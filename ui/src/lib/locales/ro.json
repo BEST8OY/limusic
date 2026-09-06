@@ -77,7 +77,12 @@
 		"choose_channel_desc": "Librăria, aprecierile și playlisturile vor folosi acest canal. Îl poți schimba mai târziu.",
 		"cancel_sign_in": "Anulează conectarea",
 		"sign_in_hint": "Conectează-te cu contul tău Google ca să îți apară librăria și playlisturile Youtube Music.",
-		"history": "Istoric"
+		"history": "Istoric",
+		"add_account": "Adaugă cont",
+		"remove_account": "Elimină cont",
+		"remove_account_title": "Scoate din Limusic?",
+		"remove_account_desc": "{name} a fost scos din lista. Contul de Google nu este afectat, și te poți conecta din nou oriunde dorești.",
+		"saved_accounts_hint": "Alege un cont salvat pentru ca să îl schimbi."
 	},
 	"player": {
 		"play": "Pune",
@@ -130,7 +135,8 @@
 		"remove_dislike": "Scoate din piese neapreciate",
 		"add_to_playlist": "Adaugă în playlist",
 		"pin_to_top": "Fixează sus",
-		"unpin": "Scoate fixarea"
+		"unpin": "Scoate fixarea",
+		"block_artist": "Blochează artistul"
 	},
 	"home": {
 		"good_morning": "Bună dimineața",
@@ -240,7 +246,9 @@
 			"storage": "Stocare",
 			"updates": "Actualizări",
 			"report": "Raportează o problemă",
-			"whats_new": "Ce este nou"
+			"whats_new": "Ce este nou",
+			"blocked": "Blochează artiștii",
+			"support": "Sprijină"
 		},
 		"general": {
 			"language": "Limba interfaței",
@@ -296,7 +304,12 @@
 			"heading_font_short_hint": "Titluri de pagină și secțiuni.",
 			"load_font_dialog": "Încarcă un font",
 			"font_filter": "Fonturi",
-			"experimental": "Experimental"
+			"experimental": "Experimental",
+			"app_icon": "Iconița aplicației",
+			"app_icon_hint": "Un fișier PNG înlocuiește iconița din bara de sarcini, tava de sistem și această fereastră. Scurtăturile și managerul de fișiere o păstrează pe cea instalată.",
+			"app_icon_pick": "Alege…",
+			"app_icon_dialog": "Alege iconița aplicației",
+			"app_icon_filter": "Imagine PNG"
 		},
 		"playback": {
 			"audio_quality": "Calitate audio",
@@ -316,7 +329,14 @@
 			"hide_videos": "Ascunde videouri în căutare",
 			"hide_videos_hint": "Arată doar audio și lansări oficiale în rezultatele de la căutare.",
 			"lyrics_provider": "Versuri sincronizate (Boidu/LRCLIB)",
-			"lyrics_provider_hint": "Preia versurile sincronizate de comunitate pentru piesele active."
+			"lyrics_provider_hint": "Preia versurile sincronizate de comunitate pentru piesele active.",
+			"blocked_artists": "Artiști blocați",
+			"blocked_artists_hint": "Artiștii blocați sunt excluși din radio, redare automată și recomandări. Playlisturile și albumele pe care le deschizi vor reda în continuare toate piesele din ele.",
+			"blocked_artists_empty": "Nimeni nu a fost blocat încă. Folosește butonul \"Blochează artiști\" din meniul unei piese.",
+			"blocked_artists_remove": "Deblochează {name}",
+			"blocked_artists_show_all": "Arată toate {count}",
+			"blocked_artists_show_less": "Arată mai puțin",
+			"blocked_artists_copy": "Copiază JSON"
 		},
 		"data": {
 			"clear_cache": "Golește memoria cache pentru imagini și fluxuri",
@@ -344,7 +364,10 @@
 			"diagnostics_saved": "Salvat",
 			"report_issue": "Deschide formularul pentru raportarea erorilor",
 			"report_issue_hint": "Deschide GitHub în browser, cu versiunea și sistemul deja adaugăt în raport.",
-			"report_issue_button": "Raportează"
+			"report_issue_button": "Raportează",
+			"kofi": "Cumpără-mi o cafea",
+			"kofi_hint": "Limusic este gratis și v-a rămâne gratis. Ko-fi este acolo dacă îți dorești să contribui.",
+			"kofi_button": "Deschide Ko-fi"
 		}
 	},
 	"dialogs": {
@@ -565,6 +588,10 @@
 		"already_in_all": "Toate {count} sunt deja în {playlist}",
 		"already_in": "Deja în {playlist}",
 		"added_songs": "{count} melodii adăugate în {playlist}",
-		"added_one": "Adăugat în {playlist}"
+		"added_one": "Adăugat în {playlist}",
+		"app_icon_set": "Iconița aplicației a fost schimbată",
+		"blocked_copied": "Copiază {count} artiști blocați ca fișier JSON",
+		"blocked_artist": "{name} a fost blocat",
+		"unblocked_artist": "{name} a fost deblocat"
 	}
 }
