@@ -75,7 +75,7 @@ pub fn open_login(app: AppHandle, state: Arc<AppState>, add_account: bool) {
                 for _ in 0..6 {
                     let cookie = read_login_cookies(&app, LOGIN_LABEL).await;
                     if innertube::cookie_sapisid(&cookie).is_some() {
-                        match state.sign_in(cookie).await {
+                        match state.sign_in(cookie, None).await {
                             Ok(SignInOutcome::Complete) => {
                                 let _ = app.emit("login-done", ());
                             }
@@ -214,10 +214,15 @@ pub async fn refresh_session(app: AppHandle, state: Arc<AppState>) {
     // sign back into it behind the user.
     for _ in 0..8 {
         let current = state.it.cookie().unwrap_or_default();
-        let Some(account) = innertube::cookie_sapisid(&current) else { return };
+        let Some(account) = innertube::cookie_sapisid(&current) else {
+            close(&app, REFRESH_LABEL);
+            return;
+        };
         let cookie = read_login_cookies(&app, REFRESH_LABEL).await;
         if innertube::cookie_sapisid(&cookie) == Some(account) && !same_jar(&cookie, &current) {
-            match state.sign_in(cookie).await {
+            // The switch could still land during the export above, so the account is checked once
+            // more under `AppState::auth`, where nothing can move underneath it.
+            match state.sign_in(cookie, Some(account)).await {
                 Ok(_) => tracing::info!("re-minted the login session from the login webview"),
                 Err(error) => tracing::warn!(%error, "could not re-mint the login session"),
             }

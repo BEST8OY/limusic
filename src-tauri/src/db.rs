@@ -225,28 +225,33 @@ impl Db {
             // The row's new key and the `active_account` pointer at it have to land together: a
             // crash between them leaves the pointer at an id nothing computes any more, and the
             // next launch sees the ids already agreeing and re-scans nothing.
-            let tx = conn.unchecked_transaction();
-            let taken: i64 = conn
+            // Every statement goes through `tx`, and the commit only happens if all of them
+            // succeeded: dropping the transaction rolls the row back, which beats committing a
+            // pointer to an id whose row never moved.
+            let Ok(tx) = conn.unchecked_transaction() else { continue };
+            let taken: i64 = tx
                 .query_row("SELECT COUNT(*) FROM accounts WHERE id = ?1", [&new_id], |r| r.get(0))
                 .unwrap_or(0);
-            if taken == 0 {
-                let _ =
-                    conn.execute("UPDATE accounts SET id = ?1 WHERE id = ?2", [&new_id, &old_id]);
+            let moved = if taken == 0 {
+                tx.execute("UPDATE accounts SET id = ?1 WHERE id = ?2", [&new_id, &old_id]).is_ok()
             } else {
                 // The canonical row is already there, written by the current build, so its cookie
                 // is the fresher one. Keep it, but inherit the older `added_at` so the menu order
                 // does not jump, and drop the stale copy.
-                let _ = conn.execute(
+                tx.execute(
                     "UPDATE accounts SET added_at = MIN(added_at, ?1) WHERE id = ?2",
                     rusqlite::params![added_at, &new_id],
-                );
-                let _ = conn.execute("DELETE FROM accounts WHERE id = ?1", [&old_id]);
-            }
-            let _ = conn.execute(
-                "UPDATE settings SET value = ?1 WHERE key = 'active_account' AND value = ?2",
-                [&new_id, &old_id],
-            );
-            if let Ok(tx) = tx {
+                )
+                .is_ok()
+                    && tx.execute("DELETE FROM accounts WHERE id = ?1", [&old_id]).is_ok()
+            };
+            let pointed = tx
+                .execute(
+                    "UPDATE settings SET value = ?1 WHERE key = 'active_account' AND value = ?2",
+                    [&new_id, &old_id],
+                )
+                .is_ok();
+            if moved && pointed {
                 let _ = tx.commit();
             }
         }

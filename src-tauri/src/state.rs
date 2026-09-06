@@ -439,8 +439,21 @@ impl AppState {
     /// discovers every server-selectable identity. A persisted matching identity wins over
     /// Google's current default; a new multi-channel login pauses before finalization and asks the
     /// UI to choose.
-    pub async fn sign_in(&self, cookie: String) -> Result<SignInOutcome, String> {
+    /// `expect_account` is the SAPISID the caller read before it went off to fetch `cookie`. The
+    /// session heal needs it: the user can switch accounts while it exports the jar, and signing
+    /// in with what it found would drag them back to the account they just left.
+    pub async fn sign_in(
+        &self,
+        cookie: String,
+        expect_account: Option<&str>,
+    ) -> Result<SignInOutcome, String> {
         let _turn = self.auth.lock().await;
+        if let Some(expect) = expect_account {
+            let live = self.it.cookie().unwrap_or_default();
+            if innertube::cookie_sapisid(&live) != Some(expect) {
+                return Err("The active account changed — skipping this sign-in.".into());
+            }
+        }
         let cookie = cookie.trim().to_owned();
         if innertube::cookie_sapisid(&cookie).is_none() {
             return Err("Sign-in didn't complete — try signing in again.".into());
