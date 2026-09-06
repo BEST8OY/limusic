@@ -18,7 +18,9 @@ const typing = (t: EventTarget | null) =>
 	t instanceof HTMLElement &&
 	(t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName));
 
-export function initShortcuts() {
+/** `mini` = the mini-player window: same transport keys, minus the ones that toggle a piece of
+ *  chrome that window doesn't render (palette, shortcut list, now-playing view). */
+export function initShortcuts(mini = false) {
 	const onKey = (e: KeyboardEvent) => {
 		if (!e.ctrlKey && !e.metaKey) {
 			// Space also activates a focused button and scrolls the page, so it is swallowed either
@@ -29,6 +31,7 @@ export function initShortcuts() {
 			e.preventDefault();
 			return;
 		}
+		if (mini && 'kKhHeE'.includes(e.key)) return;
 		switch (e.key) {
 			// Toggles, so the key that opened the palette also dismisses it.
 			case 'k':

@@ -109,7 +109,15 @@
 	onMount(() => {
 		// Before the mini-window bail-out: both windows run this SPA and both can throw.
 		initErrorLog();
-		if (isMini) return initApp(true);
+		if (isMini) {
+			// The widget gets the transport keys too. No zoom: it is a fixed-size card.
+			const teardownMiniApp = initApp(true);
+			const teardownMiniKeys = initShortcuts(true);
+			return () => {
+				teardownMiniApp();
+				teardownMiniKeys();
+			};
+		}
 		// First: it reveals the window (see initWin).
 		const teardownWin = initWin();
 		checkForUpdatesQuiet();
