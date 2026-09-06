@@ -242,8 +242,46 @@ jobs:
             -s "$BREW_PREFIX/lib" < /dev/null
           echo "bundled $(ls "$APP/Contents/Frameworks" | wc -l | tr -d ' ') libraries"
 
+      # dylibbundler rewrites EVERY LC_RPATH it finds to the same -p prefix, and Homebrew's libmpv
+      # ships two of them (the Xcode Swift toolchain and /usr/lib/swift). Both become
+      # "@executable_path/../Frameworks/", and dyld refuses to load a Mach-O that lists one rpath
+      # twice: `Library not loaded: ... Reason: duplicate LC_RPATH`. The app then dies the instant
+      # it launches, on every machine including this runner, while `otool -L` stays perfectly clean,
+      # which is exactly why the Homebrew guard below cannot see it.
+      - name: Drop the duplicate rpaths dylibbundler leaves behind
+        run: |
+          set -euo pipefail
+          APP=target/release/bundle/macos/limusic.app
+          find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
+            # `otool -l` on a non-Mach-O file just prints nothing useful, so no file-type test is
+            # needed; the awk below yields no rpaths and the inner loop does nothing.
+            #
+            # [[:space:]], not \s, for the same BSD-grep/awk reason as the guard further down.
+            # Strip the `path ` prefix and the ` (offset N)` suffix rather than taking $2, so an
+            # rpath containing a space is not silently truncated to its first word.
+            #
+            # `otool -l` prints the load commands of every slice, so on a universal binary one
+            # legitimate rpath per architecture would count as a duplicate and -delete_rpath would
+            # then strip it from all of them. Thin arm64 only here; count per `-arch` if the Intel
+            # leg in the header ever becomes a fat build instead of a second job.
+            otool -l "$f" 2>/dev/null \
+              | awk '/LC_RPATH/{g=1} g&&/^[[:space:]]*path /{sub(/^[[:space:]]*path /, ""); sub(/ \(offset [0-9]+\)$/, ""); print; g=0}' \
+              | sort | uniq -c | while read -r n rp; do
+                  [ "$n" -gt 1 ] || continue
+                  # -delete_rpath removes ONE matching entry per call, so repeat it n-1 times and
+                  # leave the last copy in place.
+                  echo "${f#$APP/}: dropping $((n - 1)) duplicate rpath(s) $rp"
+                  i=1
+                  while [ "$i" -lt "$n" ]; do
+                    install_name_tool -delete_rpath "$rp" "$f"
+                    i=$((i + 1))
+                  done
+                done
+          done
+          echo "rpath tables deduplicated"
+
       # Ad-hoc signature. Not an Apple Developer identity (see the header), but arm64 macOS will not
-      # execute a Mach-O with no valid signature at all, and every install-name rewrite above
+      # execute a Mach-O with no valid signature at all, and every install-name and rpath rewrite
       # invalidated the one the linker put there. This is the difference between an app that opens
       # and one that dies with "Killed: 9".
       - name: Re-sign the bundle
@@ -252,6 +290,35 @@ jobs:
           APP=target/release/bundle/macos/limusic.app
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
+
+      # Regression guard for the dedupe step above, placed after the re-sign so it inspects the
+      # bundle in exactly the state that gets archived. A duplicate LC_RPATH is invisible to
+      # `otool -L` and to `codesign --verify`, so without this check the first symptom is the
+      # shipped .dmg refusing to start on every user's Mac.
+      - name: Check no Mach-O lists a duplicate rpath
+        run: |
+          set -euo pipefail
+          APP=target/release/bundle/macos/limusic.app
+          # errexit does not reach inside a command substitution unless this is on, so without it
+          # a file whose inspection failed is skipped and the loop still reports success as long as
+          # a later file succeeds.
+          shopt -s inherit_errexit
+          # No `|| true` here, unlike the Homebrew guard: that one needs it because grep exits 1
+          # on every clean file, whereas uniq -d exits 0. Letting the pipeline fail is the point.
+          # A swallowed failure (otool unresolvable on some future runner image) would leave DUPES
+          # empty and pass this step over a bundle it never actually inspected.
+          DUPES="$(find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
+            otool -l "$f" 2>/dev/null \
+              | awk '/LC_RPATH/{g=1} g&&/^[[:space:]]*path /{sub(/^[[:space:]]*path /, ""); sub(/ \(offset [0-9]+\)$/, ""); print; g=0}' \
+              | sort | uniq -d | sed "s|^|${f#$APP/} <- |"
+          done)"
+          if [ -n "$DUPES" ]; then
+            echo "::error::these Mach-O files list the same rpath twice, so dyld refuses to load them:"
+            echo "$DUPES"
+            echo "The dedupe step above should have removed these. Did dylibbundler run after it?"
+            exit 1
+          fi
+          echo "every rpath table is free of duplicates"
 
       # The regression test for this workflow, and the only one available without a Mac in hand:
       # nothing in the bundle may still point at Homebrew. A single missed dependency is an app that
