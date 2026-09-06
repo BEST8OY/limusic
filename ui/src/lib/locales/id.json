@@ -77,7 +77,12 @@
 		"choose_channel_desc": "Perpustakaan, suka, dan daftar putar akan menggunakan saluran ini. Anda dapat menggantinya lagi nanti.",
 		"cancel_sign_in": "Batalkan masuk",
 		"sign_in_hint": "Masuk dengan akun Google Anda untuk mengakses perpustakaan dan daftar putar YouTube Music Anda.",
-		"history": "Riwayat"
+		"history": "Riwayat",
+		"add_account": "Tambah akun",
+		"remove_account": "Hapus akun",
+		"remove_account_title": "Hapus dari Limusic?",
+		"remove_account_desc": "{name} hanya dihapus dari list ini. Akun Google-nya sendiri tidak terpengaruhi, dan kamu bisa masuk dengan itu kapanpun kamu mau.",
+		"saved_accounts_hint": "Pilih Akun tersimpan untuk pindah ke akun tersebut."
 	},
 	"player": {
 		"play": "Putar",
@@ -130,7 +135,8 @@
 		"remove_dislike": "Hapus tidak suka",
 		"add_to_playlist": "Tambahkan ke daftar putar",
 		"pin_to_top": "Sematkan di atas",
-		"unpin": "Lepas sematan"
+		"unpin": "Lepas sematan",
+		"block_artist": "Blokir artis"
 	},
 	"home": {
 		"good_morning": "Selamat pagi",
@@ -153,7 +159,9 @@
 	"artist": {
 		"subscribe": "Berlangganan",
 		"subscribed": "Sudah berlangganan",
-		"top_songs": "Lagu teratas"
+		"top_songs": "Lagu teratas",
+		"subscribe_to": "Berlangganan ke {name}",
+		"unsubscribe_from": "Batal berlangganan dari {name}"
 	},
 	"library": {
 		"title": "Perpustakaan",
@@ -229,7 +237,9 @@
 			"storage": "Penyimpanan",
 			"updates": "Pembaruan",
 			"report": "Laporkan masalah",
-			"whats_new": "Apa yang baru"
+			"whats_new": "Apa yang baru",
+			"blocked": "Artis yang diblokir",
+			"support": "Dukung"
 		},
 		"general": {
 			"language": "Bahasa antarmuka",
@@ -285,7 +295,12 @@
 			"heading_font_short_hint": "Judul halaman dan bagian.",
 			"load_font_dialog": "Muat font",
 			"font_filter": "Font",
-			"experimental": "Eksperimental"
+			"experimental": "Eksperimental",
+			"app_icon": "Ikon aplikasi",
+			"app_icon_hint": "File PNG akan menggantikan ikon pada taskbar, baki sistem, dan jendela ini. Pintasan dan manajer file akan tetap menggunakan ikon bawaan.",
+			"app_icon_pick": "Pilih…",
+			"app_icon_dialog": "Pilih ikon aplikasi",
+			"app_icon_filter": "Gambar PNG"
 		},
 		"playback": {
 			"audio_quality": "Kualitas audio",
@@ -305,7 +320,14 @@
 			"hide_videos": "Sembunyikan video dalam pencarian",
 			"hide_videos_hint": "Hanya tampilkan trek audio dan rilis resmi dalam hasil pencarian.",
 			"lyrics_provider": "Lirik tersinkronisasi (Boidu/LRCLIB)",
-			"lyrics_provider_hint": "Ambil lirik tersinkronisasi komunitas untuk lagu yang aktif."
+			"lyrics_provider_hint": "Ambil lirik tersinkronisasi komunitas untuk lagu yang aktif.",
+			"blocked_artists": "Artis yang diblokir",
+			"blocked_artists_hint": "Artis yang diblokir akan dikecualikan dari radio, pemutaran otomatis, dan rekomendasi. Daftar putar dan album yang kamu buka tetap memutar seluruh isinya.",
+			"blocked_artists_empty": "Belum ada yang diblokir. Gunakan \"blokir artis\" dari menu ⋯ pada trek.",
+			"blocked_artists_remove": "Buka blokir {name}",
+			"blocked_artists_show_all": "Tunjukkan semua {count}",
+			"blocked_artists_show_less": "Tunjukkan lebih dikit",
+			"blocked_artists_copy": "Salin JSON"
 		},
 		"data": {
 			"clear_cache": "Hapus cache gambar dan stream",
@@ -331,7 +353,12 @@
 			"diagnostics_saved": "Disimpan",
 			"report_issue": "Buka formulir bug",
 			"report_issue_hint": "Membuka GitHub di peramban Anda dengan versi dan sistem yang terisi otomatis.",
-			"report_issue_button": "Laporkan"
+			"report_issue_button": "Laporkan",
+			"update_check_failed": "Cek update gagal: {error}",
+			"update_packaged": "Versi ini dipasang menggunakan manajer paket, perbarui dengan cara yang sama.",
+			"kofi": "Belikan saya kopi",
+			"kofi_hint": "Limusic gratis dan akan selalu gratis. Tersedia Ko-fi jika Anda ingin memberikan dukungan.",
+			"kofi_button": "Buka Ko-fi"
 		}
 	},
 	"dialogs": {
@@ -552,7 +579,11 @@
 		"already_in_all": "Semua ({count}) sudah ada di {playlist}",
 		"already_in": "Sudah ada di {playlist}",
 		"added_songs": "Menambahkan {count} lagu ke {playlist}",
-		"added_one": "Ditambahkan ke {playlist}"
+		"added_one": "Ditambahkan ke {playlist}",
+		"app_icon_set": "Ikon aplikasi terganti",
+		"blocked_copied": "{count} artis terblokir tersalin sebagai JSON",
+		"blocked_artist": "{name} terblokir",
+		"unblocked_artist": "Blokir {name} telah dibuka"
 	},
 	"history": {
 		"title": "Riwayat",
