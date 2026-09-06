@@ -157,12 +157,16 @@
 	<!-- The window itself is transparent; this root paints the background and, when not maximized,
 	     rounds the corners (the compositor can't round an undecorated window for us). Theater mode
 	     counts as maximized here: it is fullscreen, and rounding it clips the corners of a view that
-	     is meant to reach every edge (#139). -->
+	     is meant to reach every edge (#139). With a system frame (win.chrome) the compositor rounds
+	     for us, so ours would only fight it.
+	     12px, not `rounded-lg`: that resolves to --radius, which every theme sets differently, so
+	     the window corner used to change with the theme. This is the GNOME/Adwaita value (#65). -->
 	<div
 		class="flex h-screen flex-col overflow-hidden bg-background text-foreground {win.maximized ||
-		ui.theaterOpen
+		ui.theaterOpen ||
+		win.chrome !== 'off'
 			? ''
-			: 'rounded-lg'}"
+			: 'rounded-[12px]'}"
 	>
 		<ResizeBorders />
 		<Titlebar />

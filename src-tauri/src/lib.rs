@@ -322,6 +322,10 @@ pub fn run() {
             let session = Session { locale: Locale::default(), visitor_data, data_sync_id, cookie };
             let it = InnerTube::new(session, proxy.as_deref()).expect("build InnerTube");
             it.set_hide_videos(db.get_setting("hide_videos").as_deref() == Some("true"));
+            // Read while `db` is still ours; the window is decorated further down, once the rest of
+            // the setup that could fail is out of the way.
+            #[cfg_attr(target_os = "macos", allow(unused_variables))]
+            let system_titlebar = db.get_setting("system_titlebar").as_deref() == Some("true");
             it.set_blocked(blocked::block_list(&db));
             let clients = Clients::bundled();
 
@@ -523,6 +527,17 @@ pub fn run() {
                         cipher.teardown_if_idle(Duration::from_secs(600)).await;
                     }
                 });
+            }
+
+            // Hand the frame to the compositor when the user asked for it (issue #65). The window
+            // is created undecorated, so this is the one place that reverses it; macOS never gets
+            // here, its traffic lights come from `tauri.macos.conf.json`. Done before the SPA shows
+            // the window, so the frame is already there rather than popping in.
+            #[cfg(not(target_os = "macos"))]
+            if system_titlebar {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.set_decorations(true);
+                }
             }
 
             // The window starts hidden and the SPA shows it once it has mounted, so the saved size
@@ -795,6 +810,40 @@ fn spawn_event_pump(
 mod tests {
     use super::{close_hides, PositionThrottle};
     use std::time::{Duration, Instant};
+
+    /// `tauri.macos.conf.json` overrides the main window so macOS gets real traffic lights over the
+    /// app's own titlebar (issue #65). Tauri merges platform config with RFC 7386 JSON Merge Patch,
+    /// which replaces arrays wholesale, so that file has to repeat every window key from
+    /// `tauri.conf.json` rather than patch the few it changes. Nothing on this machine builds for
+    /// macOS, so a key dropped from the copy would only surface as a wrongly sized window shipped
+    /// by CI. This fails instead.
+    #[test]
+    fn macos_window_config_mirrors_the_base_window() {
+        let base: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let mac: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.macos.conf.json")).unwrap();
+        let base_win = base["app"]["windows"][0].as_object().unwrap();
+        let mac_win = mac["app"]["windows"][0].as_object().unwrap();
+
+        // Only these two may differ; the frame is the compositor's on macOS.
+        let overridden = ["decorations", "transparent"];
+        for (k, v) in base_win {
+            let got = mac_win.get(k).unwrap_or_else(|| panic!("tauri.macos.conf.json drops `{k}`"));
+            if !overridden.contains(&k.as_str()) {
+                assert_eq!(got, v, "tauri.macos.conf.json disagrees on `{k}`");
+            }
+        }
+        assert_eq!(mac_win["decorations"], serde_json::json!(true));
+        assert_eq!(mac_win["titleBarStyle"], serde_json::json!("Overlay"));
+        assert_eq!(mac_win["hiddenTitle"], serde_json::json!(true));
+
+        // Catches a typo or a key Tauri would reject: WindowConfig is `deny_unknown_fields`.
+        serde_json::from_value::<tauri::utils::config::WindowConfig>(
+            mac["app"]["windows"][0].clone(),
+        )
+        .expect("macOS window config is not a valid WindowConfig");
+    }
 
     #[test]
     fn close_hides_unless_explicitly_disabled() {
