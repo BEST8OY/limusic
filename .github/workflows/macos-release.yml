@@ -299,23 +299,24 @@ jobs:
         run: |
           set -euo pipefail
           APP=target/release/bundle/macos/limusic.app
-          # errexit does not reach inside a command substitution unless this is on, so without it
-          # a file whose inspection failed is skipped and the loop still reports success as long as
-          # a later file succeeds.
-          shopt -s inherit_errexit
-          # No `|| true` here, unlike the Homebrew guard: that one needs it because grep exits 1
-          # on every clean file, whereas uniq -d exits 0. Letting the pipeline fail is the point.
-          # A swallowed failure (otool unresolvable on some future runner image) would leave DUPES
-          # empty and pass this step over a bundle it never actually inspected.
+          # No `|| true` here, unlike the Homebrew guard: that one needs it because grep exits 1 on
+          # every clean file, whereas uniq -d exits 0, so a non-zero pipeline here means otool
+          # could not read the file. errexit does not reach inside a command substitution (and
+          # macOS ships bash 3.2, which has no inherit_errexit to change that), so turn the failure
+          # into a line of output instead. A guard that reports success over files it never managed
+          # to inspect is worse than no guard.
           DUPES="$(find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
             otool -l "$f" 2>/dev/null \
               | awk '/LC_RPATH/{g=1} g&&/^[[:space:]]*path /{sub(/^[[:space:]]*path /, ""); sub(/ \(offset [0-9]+\)$/, ""); print; g=0}' \
-              | sort | uniq -d | sed "s|^|${f#$APP/} <- |"
+              | sort | uniq -d | sed "s|^|${f#$APP/} <- |" \
+              || echo "${f#$APP/} <- COULD NOT INSPECT, otool failed"
           done)"
           if [ -n "$DUPES" ]; then
-            echo "::error::these Mach-O files list the same rpath twice, so dyld refuses to load them:"
+            echo "::error::the rpath check did not come back clean:"
             echo "$DUPES"
-            echo "The dedupe step above should have removed these. Did dylibbundler run after it?"
+            echo "An rpath on the right is one a Mach-O lists twice, which dyld refuses to load;"
+            echo "the dedupe step above should have removed it. COULD NOT INSPECT means the bundle"
+            echo "was never fully checked."
             exit 1
           fi
           echo "every rpath table is free of duplicates"
