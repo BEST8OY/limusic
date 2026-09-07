@@ -397,7 +397,7 @@
 		},
 		"shortcuts": {
 			"title": "Scurtături de tastatură",
-			"reopen_hint": "{mod}H îl va deschide oricând.",
+			"reopen_hint": "{key} îl va deschide oricând.",
 			"group_playback": "Redare",
 			"group_general": "General",
 			"play_pause": "Redă sau pune pauză",
