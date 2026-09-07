@@ -13,10 +13,9 @@
 //! - Spec-compliant `SetPosition(track_id, position_us)` validating TrackId before seeking.
 //! - D-Bus `Seeked(position_us)` signal on scrub.
 //! - Root interface window control (`Raise`, `Quit`, `Fullscreen` get/set).
-//! - Local cover art caching for 100% reliable artwork display across all Linux desktops.
+//! - Direct cover art URL (`mpris:artUrl`) support.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -85,7 +84,6 @@ pub struct MprisShared {
     pub shuffle: bool,
     pub volume: f64,
     pub capabilities: MediaCapabilities,
-    pub cached_cover_path: Option<PathBuf>,
 }
 
 fn to_owned_value<T: Into<Value<'static>>>(v: T) -> OwnedValue {
@@ -110,7 +108,6 @@ impl Default for MprisShared {
             shuffle: false,
             volume: 1.0,
             capabilities: MediaCapabilities::default(),
-            cached_cover_path: None,
         }
     }
 }
@@ -446,19 +443,6 @@ async fn run_mpris_server(
 
     tracing::info!(name = %name, "Native MPRIS 2.2 service registered");
 
-    // Cache directory for cover art
-    let cover_dir = app
-        .path()
-        .app_cache_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("limusic"))
-        .join("mpris_covers");
-    let _ = tokio::fs::create_dir_all(&cover_dir).await;
-    if let Ok(mut entries) = tokio::fs::read_dir(&cover_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let _ = tokio::fs::remove_file(entry.path()).await;
-        }
-    }
-
     // Retrieve interface reference to emit property changed signals
     let iface_ref = conn
         .object_server()
@@ -526,53 +510,12 @@ async fn run_mpris_server(
 
                 // Handle cover art
                 if let Some(ref cover) = meta.cover_url {
-                    if cover.starts_with("file://") || cover.starts_with('/') {
-                        let file_url = if cover.starts_with('/') {
-                            format!("file://{cover}")
-                        } else {
-                            cover.clone()
-                        };
-                        map.insert("mpris:artUrl".to_string(), to_owned_value(file_url));
-                    } else if cover.starts_with("http://") || cover.starts_with("https://") {
-                        let dest_file = cover_dir
-                            .join(format!("cover_{}.jpg", md5_hex(meta.track_id.as_bytes())));
-                        if dest_file.exists() {
-                            let file_url = format!("file://{}", dest_file.to_string_lossy());
-                            map.insert("mpris:artUrl".to_string(), to_owned_value(file_url));
-                            let mut s = shared.write().await;
-                            s.cached_cover_path = Some(dest_file);
-                        } else {
-                            // Immediately set the HTTP artUrl for clients that support it
-                            map.insert("mpris:artUrl".to_string(), to_owned_value(cover.clone()));
-
-                            // Also download locally for desktop lock screens and widgets that require file://
-                            let cover_url = cover.clone();
-                            let dest_clone = dest_file.clone();
-                            let shared_clone = shared.clone();
-                            let iface_clone = iface_ref.clone();
-
-                            tauri::async_runtime::spawn(async move {
-                                if let Ok(bytes) = download_image(&cover_url).await {
-                                    if tokio::fs::write(&dest_clone, bytes).await.is_ok() {
-                                        let local_url =
-                                            format!("file://{}", dest_clone.to_string_lossy());
-                                        {
-                                            let mut s = shared_clone.write().await;
-                                            s.cached_cover_path = Some(dest_clone);
-                                            s.metadata.insert(
-                                                "mpris:artUrl".to_string(),
-                                                to_owned_value(local_url),
-                                            );
-                                        }
-                                        let player = iface_clone.get().await;
-                                        let _ = player
-                                            .metadata_changed(iface_clone.signal_emitter())
-                                            .await;
-                                    }
-                                }
-                            });
-                        }
-                    }
+                    let file_url = if cover.starts_with('/') {
+                        format!("file://{cover}")
+                    } else {
+                        cover.clone()
+                    };
+                    map.insert("mpris:artUrl".to_string(), to_owned_value(file_url));
                 }
 
                 let is_repeat = {
@@ -712,28 +655,7 @@ async fn run_mpris_server(
         }
     }
 
-    // Cleanup on exit
-    if let Some(cover_file) = shared.write().await.cached_cover_path.take() {
-        let _ = tokio::fs::remove_file(cover_file).await;
-    }
-
     Ok(())
-}
-
-fn md5_hex(bytes: &[u8]) -> String {
-    use md5::{Digest, Md5};
-    let mut hasher = Md5::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
-async fn download_image(url: &str) -> Result<Vec<u8>, ()> {
-    let resp = reqwest::get(url).await.map_err(|_| ())?;
-    if !resp.status().is_success() {
-        return Err(());
-    }
-    let bytes = resp.bytes().await.map_err(|_| ())?;
-    Ok(bytes.to_vec())
 }
 
 #[cfg(test)]
