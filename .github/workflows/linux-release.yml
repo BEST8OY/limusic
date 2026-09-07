@@ -235,8 +235,15 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not set — the build would produce an unsignable AppImage"
-            exit 1
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "::warning::TAURI_SIGNING_PRIVATE_KEY secret is not set — building unsigned AppImage and deb for dry run"
+              TAURI_CONFIG='{"build":{"beforeBuildCommand":""},"bundle":{"createUpdaterArtifacts":false}}'
+            else
+              echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not set — the build would produce an unsignable AppImage"
+              exit 1
+            fi
+          else
+            TAURI_CONFIG='{"build":{"beforeBuildCommand":""}}'
           fi
           (cd ui && pnpm build)
           # beforeBuildCommand is emptied because we just ran it, deterministically. Left on, tauri
@@ -244,7 +251,7 @@ jobs:
           # frontend packages (ui/, website/) pnpm picks is up to the filesystem: Windows resolved
           # it to ui, Linux to website, whose deps this job never installs. It only works locally
           # because you run it from ui/.
-          tauri build --bundles appimage,deb --config '{"build":{"beforeBuildCommand":""}}'
+          tauri build --bundles appimage,deb --config "$TAURI_CONFIG"
           # Strip the bundled TLS trust stack + gio modules out of the AppDir and repack: they are
           # coupled to the build host's config and leave the webview with no TLS backend anywhere
           # else. Repacking invalidates the bundler's signature, so the script re-signs — which is
@@ -394,7 +401,6 @@ jobs:
           name: limusic-linux-dry-run-${{ steps.rel.outputs.safe_tag }}
           path: |
             target/release/bundle/appimage/*.AppImage
-            target/release/bundle/appimage/*.sig
             target/release/bundle/deb/*.deb
           if-no-files-found: error
           retention-days: 7
