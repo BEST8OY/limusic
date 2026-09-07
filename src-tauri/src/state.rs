@@ -335,6 +335,9 @@ const VIDEO_URL_TTL_SECS: i64 = 4 * 60 * 60;
 /// free, not to be a download cache.
 const VIDEO_URL_CAP: usize = 8;
 
+/// How far into a track Previous stops meaning "go back" and starts meaning "start this one over".
+const PREV_REWIND_SECS: f64 = 3.0;
+
 type VideoUrls = std::collections::HashMap<String, (String, i64)>;
 
 fn put_url(map: &mut VideoUrls, id: &str, url: String, now: i64) {
@@ -1475,6 +1478,9 @@ impl AppState {
             q.seek_to(index);
             q.lookahead_loaded = None;
         }
+        // The next mpv tick is seconds away (a resolve has to finish first); until then
+        // `current_position` would still report the outgoing track's position.
+        self.latest_position.store(0f64.to_bits(), Ordering::SeqCst);
         if self.start_current(gen).await {
             self.prime_lookahead(gen).await;
         }
@@ -2075,7 +2081,15 @@ impl AppState {
         }
     }
 
+    /// Previous: rewind first, step back second (issue #187). Past the first few seconds of a
+    /// track, Previous restarts it, the convention every other transport follows, so reaching the
+    /// earlier track means pressing it again from the top. Guests fall through to `play_index`,
+    /// which is where they get the host-only hint.
     pub async fn prev_in_queue(self: &std::sync::Arc<Self>) {
+        if self.current_position() > PREV_REWIND_SECS && !self.lt.is_guest().await {
+            let _ = self.user_seek(0.0).await;
+            return;
+        }
         let i = self.queue.lock().await.current.saturating_sub(1);
         self.play_index(i).await;
     }

@@ -25,6 +25,7 @@
 	import { copyText } from '$lib/clipboard';
 	import * as api from '$lib/api';
 	import { blocked, prefs, ui, toast, unblockArtist } from '$lib/player.svelte';
+	import { win } from '$lib/win.svelte';
 	import ColorPicker from '$lib/components/ColorPicker.svelte';
 	import Changelog from '$lib/components/Changelog.svelte';
 	import {
@@ -302,6 +303,10 @@
 	const discordOn = $derived(settings.discord_rpc === 'true');
 	const trayOn = $derived(settings.close_to_tray !== 'false');
 	const autostartOn = $derived(settings.autostart === 'true');
+	// `native_chrome` is read-only and platform-derived (commands.rs). `overlay` is macOS, where the
+	// traffic lights are fixed at window creation and there is nothing to offer the user (#65).
+	const systemTitlebarOn = $derived(settings.native_chrome !== 'off');
+	const systemTitlebarFixed = $derived(settings.native_chrome === 'overlay');
 	const disabled = $derived(
 		new Set(
 			(settings.disabled_stream_clients ?? '')
@@ -376,6 +381,21 @@
 	async function setTray(on: boolean) {
 		settings.close_to_tray = on ? 'true' : 'false';
 		await api.setSetting('close_to_tray', settings.close_to_tray);
+	}
+
+	// The backend flips the real window decorations; `win.chrome` is what the SPA keys its own
+	// corner rounding, resize borders and window buttons off, so it has to move with it.
+	async function setSystemTitlebar(on: boolean) {
+		const prev = win.chrome;
+		settings.native_chrome = on ? 'on' : 'off';
+		win.chrome = on ? 'on' : 'off';
+		try {
+			await api.setSetting('system_titlebar', on ? 'true' : 'false');
+		} catch (e) {
+			settings.native_chrome = prev;
+			win.chrome = prev;
+			toast.error(String(e));
+		}
 	}
 
 	async function setAutostart(on: boolean) {
@@ -552,6 +572,13 @@
 									desc: t('settings.general.autostart_hint'),
 									control: autostartSwitch
 								})}
+								{#if !systemTitlebarFixed}
+									{@render row({
+										title: t('settings.general.system_titlebar'),
+										desc: t('settings.general.system_titlebar_hint'),
+										control: systemTitlebarSwitch
+									})}
+								{/if}
 							</div>
 						</section>
 					{:else if tab === 'themes'}
@@ -859,6 +886,10 @@
 {#snippet discordSwitch()}<Switch checked={discordOn} onCheckedChange={setDiscord} />{/snippet}
 {#snippet traySwitch()}<Switch checked={trayOn} onCheckedChange={setTray} />{/snippet}
 {#snippet autostartSwitch()}<Switch checked={autostartOn} onCheckedChange={setAutostart} />{/snippet}
+{#snippet systemTitlebarSwitch()}<Switch
+		checked={systemTitlebarOn}
+		onCheckedChange={setSystemTitlebar}
+	/>{/snippet}
 {#snippet autoplaySwitch()}<Switch checked={autoplayOn} onCheckedChange={setAutoplay} />{/snippet}
 {#snippet dupSwitch()}<Switch
 		checked={preventDuplicatesOn}

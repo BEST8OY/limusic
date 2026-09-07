@@ -183,6 +183,13 @@ cargo tauri build --bundles deb   # → target/release/bundle/deb/limusic_*.deb
   version, so whatever the CI runner ships is the floor. It tracks `runs-on` in the workflow.
 - Media keys use **MPNowPlayingInfoCenter / MPRemoteCommandCenter** (Control Center + the Now
   Playing widget). Works from the `.app` bundle; a bare binary run won't register.
+- **`src-tauri/tauri.macos.conf.json` is a full copy of the window config, not a patch.** Tauri
+  merges the platform config with RFC 7386 JSON Merge Patch, and that **replaces arrays wholesale**,
+  so the `windows` entry there has to repeat every key from `tauri.conf.json` (size, minimums,
+  `visible: false`, `dragDropEnabled`) on top of the macOS overrides: `decorations: true`,
+  `transparent: false`, `titleBarStyle: "Overlay"`, `hiddenTitle: true`. That is what puts the
+  traffic lights over the app's own titlebar (issue #65). **Change the window geometry in
+  `tauri.conf.json` and you must mirror it here**, or macOS silently keeps the old numbers.
 - **Login works, but not via `cookies_for_url`.** WKWebView's implementation compares the cookie's
   domain to the URL's host with `==`, so YouTube's `.youtube.com` cookies never match
   `music.youtube.com` and the jar came back empty (no SAPISID, so sign-in gave up silently).

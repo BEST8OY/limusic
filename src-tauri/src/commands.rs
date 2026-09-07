@@ -179,7 +179,7 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 15] = [
+const UI_SETTINGS: [&str; 16] = [
     "volume",
     "proxy",
     "quality",
@@ -195,6 +195,7 @@ const UI_SETTINGS: [&str; 15] = [
     "lyrics_boidu",
     "music_videos",
     "sticky_shuffle",
+    "system_titlebar",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -236,15 +237,31 @@ pub async fn forget_video_stream(state: St<'_>, video_id: String) -> Result<(), 
     Ok(())
 }
 
+/// Who draws the window frame, as the SPA needs to know it (issue #65). Read-only, derived: the
+/// stored `system_titlebar` preference on Linux/Windows, and always `overlay` on macOS, where the
+/// traffic lights come from `tauri.macos.conf.json`'s `titleBarStyle: Overlay` and there is no
+/// preference to make. Anything but `off` means the app hides its own window buttons, drops its
+/// corner rounding and leaves resizing to the compositor.
+fn native_chrome(db: &crate::db::Db) -> &'static str {
+    if cfg!(target_os = "macos") {
+        "overlay"
+    } else if db.get_setting("system_titlebar").as_deref() == Some("true") {
+        "on"
+    } else {
+        "off"
+    }
+}
+
 #[tauri::command]
 pub async fn get_settings(state: St<'_>) -> Result<serde_json::Value, String> {
-    let map: serde_json::Map<String, serde_json::Value> = state
+    let mut map: serde_json::Map<String, serde_json::Value> = state
         .db
         .all_settings()
         .into_iter()
         .filter(|(k, _)| UI_SETTINGS.contains(&k.as_str()))
         .map(|(k, v)| (k, serde_json::Value::String(v)))
         .collect();
+    map.insert("native_chrome".into(), native_chrome(&state.db).into());
     Ok(serde_json::Value::Object(map))
 }
 
@@ -272,6 +289,15 @@ pub async fn set_setting(
     // would keep its word timings (and one fetched while off would never gain them) forever.
     if key == "lyrics_boidu" {
         state.db.clear_lyrics_cache();
+    }
+    // Hand the frame back to the compositor (or take it again). macOS is not on this path: its
+    // titlebar style is fixed at window creation, so the setting is hidden there.
+    #[cfg(not(target_os = "macos"))]
+    if key == "system_titlebar" {
+        use tauri::Manager;
+        if let Some(w) = app.get_webview_window("main") {
+            w.set_decorations(value == "true").map_err(|e| format!("decorations: {e}"))?;
+        }
     }
     // Registers/removes the login autostart entry on toggle; the OS persists it from there.
     // ponytail: no startup re-sync against the OS state — add reconciliation only if drift is
