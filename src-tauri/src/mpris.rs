@@ -231,6 +231,7 @@ impl MprisPlayer {
     async fn stop(&self) {
         if let Some(state) = self.app.try_state::<Arc<AppState>>() {
             let _ = state.player.pause();
+            let _ = state.user_seek(0.0).await;
         }
     }
 
