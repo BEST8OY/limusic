@@ -14,6 +14,8 @@ mod local;
 mod lyrics;
 mod media;
 mod mini;
+#[cfg(target_os = "linux")]
+pub mod mpris;
 mod orchestrator;
 mod potoken;
 mod session;
