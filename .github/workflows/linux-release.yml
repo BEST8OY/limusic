@@ -393,15 +393,22 @@ jobs:
         run: echo "dry_run - every build step and guard passed; release assets left untouched."
 
       # Dry runs do not publish release assets to GitHub Releases, but keeping the AppImage and
-      # deb as workflow artifacts allows inspecting, downloading, or testing the binaries locally.
-      - name: Dry run, keep AppImage and deb as artifacts
+      # deb as separate workflow artifacts allows inspecting or installing either format directly.
+      - name: Dry run, keep AppImage as an artifact
         if: ${{ inputs.dry_run }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: limusic-linux-dry-run-${{ steps.rel.outputs.safe_tag }}
-          path: |
-            target/release/bundle/appimage/*.AppImage
-            target/release/bundle/deb/*.deb
+          name: limusic-appimage-${{ steps.rel.outputs.safe_tag }}
+          path: target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Dry run, keep deb as an artifact
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: limusic-deb-${{ steps.rel.outputs.safe_tag }}
+          path: target/release/bundle/deb/*.deb
           if-no-files-found: error
           retention-days: 7
 
