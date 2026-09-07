@@ -2308,7 +2308,20 @@ impl AppState {
     /// watch-history ping, latched to happen exactly once per play. The ping is additionally
     /// gated on the `enable_history` setting + being logged in. Best-effort (errors logged).
     pub async fn on_position(&self, pos: f64) {
+        let prev = self.current_position();
         self.record_position(pos);
+
+        // Seamless loop detection (e.g. mpv loop-file in RepeatMode::One):
+        // When a track repeats seamlessly, position wraps from near duration back to 0.
+        // Notify media controls (Seeked(0) on D-Bus) and reset history latch for the new play.
+        if prev > PREV_REWIND_SECS && pos < 0.5 {
+            if let Some(m) = &self.media {
+                m.notify_seeked(0.0);
+            }
+            self.history_pinged.store(false, Ordering::Relaxed);
+            self.last_media_push.store(0, Ordering::Relaxed);
+        }
+
         // Latched: nothing below can fire again for this play, so don't queue up behind the
         // queue mutex on every tick just to be told so. See `AppState::history_pinged`.
         if self.history_pinged.load(Ordering::Relaxed) {
@@ -2921,6 +2934,7 @@ impl AppState {
             return Ok(()); // guests can't scrub — the host controls the timeline
         }
         self.player.seek(position).map_err(|e| e.to_string())?;
+        self.record_position(position);
         if let Some(m) = &self.media {
             m.notify_seeked(position);
         }

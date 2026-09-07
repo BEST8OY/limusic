@@ -575,6 +575,11 @@ async fn run_mpris_server(
                     }
                 }
 
+                let is_repeat = {
+                    let s = shared.read().await;
+                    !s.current_track_id.is_empty() && s.current_track_id == track_id
+                };
+
                 {
                     let mut s = shared.write().await;
                     s.current_track_id = track_id;
@@ -582,7 +587,12 @@ async fn run_mpris_server(
                 }
 
                 let player = iface_ref.get().await;
-                let _ = player.metadata_changed(iface_ref.signal_emitter()).await;
+                let emitter = iface_ref.signal_emitter();
+                let _ = player.metadata_changed(emitter).await;
+
+                if is_repeat {
+                    let _ = MprisPlayer::seeked(emitter, 0).await;
+                }
             }
             MprisCommand::SetDuration(secs) => {
                 let us = (secs * 1_000_000.0).max(0.0) as i64;
@@ -768,6 +778,16 @@ mod tests {
             _ => panic!("expected array"),
         };
         assert_eq!(extracted, vec!["Artist 1", "Artist 2"]);
+    }
+
+    #[test]
+    fn repeat_detection_logic() {
+        let current_id = format_track_id("track1");
+        let same_id = format_track_id("track1");
+        let diff_id = format_track_id("track2");
+
+        assert_eq!(current_id, same_id);
+        assert_ne!(current_id, diff_id);
     }
 }
 
