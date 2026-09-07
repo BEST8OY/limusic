@@ -80,6 +80,7 @@ jobs:
           TAG="${{ inputs.tag }}"
           [ -n "$TAG" ] || { echo "::error::no tag to build for"; exit 1; }
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "safe_tag=${TAG//\//-}" >> "$GITHUB_OUTPUT"
 
       # Actions are pinned to commit SHAs, not tags: `@v4` and `@v2` are mutable, and
       # `dtolnay/rust-toolchain@stable` is a *branch*. This job holds TAURI_SIGNING_PRIVATE_KEY and
@@ -383,6 +384,20 @@ jobs:
       - name: Dry run — built and verified, attaching nothing
         if: ${{ inputs.dry_run }}
         run: echo "dry_run - every build step and guard passed; release assets left untouched."
+
+      # Dry runs do not publish release assets to GitHub Releases, but keeping the AppImage and
+      # deb as workflow artifacts allows inspecting, downloading, or testing the binaries locally.
+      - name: Dry run, keep AppImage and deb as artifacts
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: limusic-linux-dry-run-${{ steps.rel.outputs.safe_tag }}
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.sig
+            target/release/bundle/deb/*.deb
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Attach the AppImage + deb, teach latest.json about Linux
         if: ${{ !inputs.dry_run }}
