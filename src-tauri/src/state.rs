@@ -2011,7 +2011,87 @@ impl AppState {
                     format!("file://{t}")
                 }
             });
-            m.set_metadata(&item.title, &item.artists, item.album.as_deref(), cover.as_deref());
+
+            let artists = if !item.artist_runs.is_empty() {
+                let runs: Vec<String> = item
+                    .artist_runs
+                    .iter()
+                    .filter(|r| r.id.is_some() || !r.text.trim().is_empty())
+                    .map(|r| r.text.trim().to_string())
+                    .filter(|t| !t.is_empty() && t != "&" && t != ",")
+                    .collect();
+                if runs.is_empty() {
+                    vec![item.artists.clone()]
+                } else {
+                    runs
+                }
+            } else if !item.artists.is_empty() {
+                vec![item.artists.clone()]
+            } else {
+                Vec::new()
+            };
+
+            let web_url = if crate::local::is_local_song(&item.video_id) {
+                crate::local::song_path(&item.video_id).map(|p| format!("file://{p}"))
+            } else {
+                Some(format!("https://music.youtube.com/watch?v={}", item.video_id))
+            };
+
+            let (album_artist, track_number) = if crate::local::is_local_song(&item.video_id) {
+                if let Some(path) = crate::local::song_path(&item.video_id) {
+                    let tracks = self.db.local_tracks(None);
+                    tracks
+                        .into_iter()
+                        .find(|t| t.path == path)
+                        .map(|t| (t.album_artist, Some(t.track_no as i32)))
+                        .unwrap_or((None, None))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+
+            let lyrics = self
+                .db
+                .get_lyrics(&item.video_id, crate::db::now_secs(), 86400)
+                .flatten();
+
+            let dur = self
+                .queue
+                .try_lock()
+                .ok()
+                .map(|q| q.duration)
+                .filter(|d| *d > 0.0);
+
+            m.set_metadata(crate::media::MediaTrackMetadata {
+                track_id: item.video_id.clone(),
+                title: item.title.clone(),
+                artists,
+                album: item.album.clone(),
+                album_artist,
+                track_number,
+                disc_number: None,
+                duration_secs: dur,
+                cover_url: cover,
+                web_url,
+                lyrics,
+            });
+
+            let (can_go_next, can_go_previous) = if let Ok(q) = self.queue.try_lock() {
+                let has_next = next_index(q.items.len(), q.current, q.repeat).is_some()
+                    || q.repeat != RepeatMode::Off;
+                (has_next || self.history_enabled(), !q.items.is_empty())
+            } else {
+                (true, true)
+            };
+            m.set_capabilities(crate::media::MediaCapabilities {
+                can_go_next,
+                can_go_previous,
+                can_play: true,
+                can_pause: true,
+                can_seek: true,
+            });
         }
         if let Some(d) = &self.discord {
             d.set_track(item);
@@ -2034,12 +2114,37 @@ impl AppState {
             // Record what the controls now hold, or the next tick would repeat this very push.
             *self.last_media_state.lock().unwrap() = Some((playing, pos));
             m.set_playback(playing, pos);
+
+            let (can_go_next, can_go_previous) = if let Ok(q) = self.queue.try_lock() {
+                let has_next = next_index(q.items.len(), q.current, q.repeat).is_some()
+                    || q.repeat != RepeatMode::Off;
+                (has_next || self.history_enabled(), !q.items.is_empty())
+            } else {
+                (true, true)
+            };
+            m.set_capabilities(crate::media::MediaCapabilities {
+                can_go_next,
+                can_go_previous,
+                can_play: true,
+                can_pause: playing,
+                can_seek: true,
+            });
         }
         #[cfg(target_os = "windows")]
         crate::taskbar::set_playing(&self.app, playing);
         if let Some(d) = &self.discord {
             d.set_playing(playing);
         }
+    }
+
+    pub fn set_media_volume(&self, volume: i64) {
+        if let Some(m) = &self.media {
+            m.set_volume(volume);
+        }
+    }
+
+    pub async fn is_shuffled(&self) -> bool {
+        self.queue.lock().await.shuffle_orig.is_some()
     }
 
     /// Toggle Discord presence at runtime (the `discord_rpc` setting). Turning it off clears the
@@ -2816,6 +2921,9 @@ impl AppState {
             return Ok(()); // guests can't scrub — the host controls the timeline
         }
         self.player.seek(position).map_err(|e| e.to_string())?;
+        if let Some(m) = &self.media {
+            m.notify_seeked(position);
+        }
         if self.lt.is_host().await {
             self.lt
                 .broadcast_playback(Playback::at(PlaybackKind::Seek, (position * 1000.0) as i64))
@@ -2874,6 +2982,10 @@ impl AppState {
         // actually near.
         self.extend_queue_radio(gen).await;
         self.lt_broadcast_queue().await;
+        if let Some(m) = &self.media {
+            let is_shuffled = self.queue.lock().await.shuffle_orig.is_some();
+            m.set_shuffle(is_shuffled);
+        }
     }
 
     /// Set the repeat mode. Repeat-one is enforced by mpv's `loop-file` (seamless, no end-file
@@ -2886,6 +2998,9 @@ impl AppState {
         {
             let mut q = self.queue.lock().await;
             q.repeat = mode;
+        }
+        if let Some(m) = &self.media {
+            m.set_repeat(mode);
         }
         let _ = self.player.set_loop_file(mode == RepeatMode::One);
         self.emit_queue().await; // carries the new repeat state to the UI
