@@ -77,6 +77,10 @@ pub struct AppState {
     /// resume-position persistence.
     latest_position: AtomicU64,
     last_pos_persist: AtomicU64,
+    /// Generation of the track whose position was recorded in `latest_position`.
+    /// When `generation` changes, position ticks from the previous track or the transition
+    /// are recognized as a track boundary, preventing false-positive seamless loop detections.
+    last_pos_generation: AtomicU64,
     /// Wall-clock secs of the last position push to the OS media controls (throttled ~1s).
     last_media_push: AtomicU64,
     /// Last `(playing, position)` actually handed to the OS media controls, so the steady-state
@@ -389,6 +393,7 @@ impl AppState {
             video_urls: std::sync::Mutex::new(std::collections::HashMap::new()),
             latest_position: AtomicU64::new(0),
             last_pos_persist: AtomicU64::new(0),
+            last_pos_generation: AtomicU64::new(0),
             last_media_push: AtomicU64::new(0),
             last_media_state: std::sync::Mutex::new(None),
             last_queue_fingerprint: AtomicU64::new(0),
@@ -1575,6 +1580,7 @@ impl AppState {
             self.history_pinged.store(false, Ordering::Relaxed);
             q.duration = 0.0;
         }
+        self.latest_position.store(0f64.to_bits(), Ordering::SeqCst);
         if let Some(item) = self.current_item().await {
             self.emit_now_playing(&item, "gapless");
             // Same as `start_current`: an autoplay-appended track carries no rating of its own.
@@ -1736,6 +1742,8 @@ impl AppState {
         if let Some(pos) = seek {
             let _ = self.player.seek(pos);
         }
+        let start_pos = seek.unwrap_or(0.0);
+        self.latest_position.store(start_pos.to_bits(), Ordering::SeqCst);
         // Items played from cards/radio can arrive without a duration; the player response knows
         // the exact length of the cut we stream. Backfill before emitting — lyrics matching keys
         // on it (a wrong-cut LRCLIB match plays lyrics seconds off the audio).
@@ -2062,7 +2070,15 @@ impl AppState {
                 .try_lock()
                 .ok()
                 .map(|q| q.duration)
-                .filter(|d| *d > 0.0);
+                .filter(|d| *d > 0.0)
+                .or_else(|| {
+                    let ms = parse_duration_ms(item.duration.as_deref());
+                    if ms > 0 {
+                        Some(ms as f64 / 1000.0)
+                    } else {
+                        None
+                    }
+                });
 
             m.set_metadata(crate::media::MediaTrackMetadata {
                 track_id: item.video_id.clone(),
@@ -2308,13 +2324,17 @@ impl AppState {
     /// watch-history ping, latched to happen exactly once per play. The ping is additionally
     /// gated on the `enable_history` setting + being logged in. Best-effort (errors logged).
     pub async fn on_position(&self, pos: f64) {
-        let prev = self.current_position();
+        let cur_gen = self.generation.load(Ordering::SeqCst);
+        let prev_gen = self.last_pos_generation.swap(cur_gen, Ordering::SeqCst);
+        let is_new_track = prev_gen != cur_gen;
+
+        let prev = if is_new_track { 0.0 } else { self.current_position() };
         self.record_position(pos);
 
         // Seamless loop detection (e.g. mpv loop-file in RepeatMode::One):
         // When a track repeats seamlessly, position wraps from near duration back to 0.
         // Notify media controls (Seeked(0) on D-Bus) and reset history latch for the new play.
-        if prev > PREV_REWIND_SECS && pos < 0.5 {
+        if !is_new_track && prev > PREV_REWIND_SECS && pos < 0.5 {
             if let Some(m) = &self.media {
                 m.notify_seeked(0.0);
             }

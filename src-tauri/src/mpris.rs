@@ -525,14 +525,6 @@ async fn run_mpris_server(
                 }
 
                 // Handle cover art
-                let old_cover = {
-                    let mut s = shared.write().await;
-                    s.cached_cover_path.take()
-                };
-                if let Some(old) = old_cover {
-                    let _ = tokio::fs::remove_file(old).await;
-                }
-
                 if let Some(ref cover) = meta.cover_url {
                     if cover.starts_with("file://") || cover.starts_with('/') {
                         let file_url = if cover.starts_with('/') {
@@ -542,37 +534,44 @@ async fn run_mpris_server(
                         };
                         map.insert("mpris:artUrl".to_string(), to_owned_value(file_url));
                     } else if cover.starts_with("http://") || cover.starts_with("https://") {
-                        // Immediately set the HTTP artUrl for clients that support it
-                        map.insert("mpris:artUrl".to_string(), to_owned_value(cover.clone()));
-
-                        // Also download locally for desktop lock screens and widgets that require file://
-                        let cover_url = cover.clone();
                         let dest_file = cover_dir
                             .join(format!("cover_{}.jpg", md5_hex(meta.track_id.as_bytes())));
-                        let dest_clone = dest_file.clone();
-                        let shared_clone = shared.clone();
-                        let iface_clone = iface_ref.clone();
+                        if dest_file.exists() {
+                            let file_url = format!("file://{}", dest_file.to_string_lossy());
+                            map.insert("mpris:artUrl".to_string(), to_owned_value(file_url));
+                            let mut s = shared.write().await;
+                            s.cached_cover_path = Some(dest_file);
+                        } else {
+                            // Immediately set the HTTP artUrl for clients that support it
+                            map.insert("mpris:artUrl".to_string(), to_owned_value(cover.clone()));
 
-                        tauri::async_runtime::spawn(async move {
-                            if let Ok(bytes) = download_image(&cover_url).await {
-                                if tokio::fs::write(&dest_clone, bytes).await.is_ok() {
-                                    let local_url =
-                                        format!("file://{}", dest_clone.to_string_lossy());
-                                    {
-                                        let mut s = shared_clone.write().await;
-                                        s.cached_cover_path = Some(dest_clone);
-                                        s.metadata.insert(
-                                            "mpris:artUrl".to_string(),
-                                            to_owned_value(local_url),
-                                        );
+                            // Also download locally for desktop lock screens and widgets that require file://
+                            let cover_url = cover.clone();
+                            let dest_clone = dest_file.clone();
+                            let shared_clone = shared.clone();
+                            let iface_clone = iface_ref.clone();
+
+                            tauri::async_runtime::spawn(async move {
+                                if let Ok(bytes) = download_image(&cover_url).await {
+                                    if tokio::fs::write(&dest_clone, bytes).await.is_ok() {
+                                        let local_url =
+                                            format!("file://{}", dest_clone.to_string_lossy());
+                                        {
+                                            let mut s = shared_clone.write().await;
+                                            s.cached_cover_path = Some(dest_clone);
+                                            s.metadata.insert(
+                                                "mpris:artUrl".to_string(),
+                                                to_owned_value(local_url),
+                                            );
+                                        }
+                                        let player = iface_clone.get().await;
+                                        let _ = player
+                                            .metadata_changed(iface_clone.signal_emitter())
+                                            .await;
                                     }
-                                    let player = iface_clone.get().await;
-                                    let _ = player
-                                        .metadata_changed(iface_clone.signal_emitter())
-                                        .await;
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
                 }
 
@@ -597,13 +596,23 @@ async fn run_mpris_server(
             }
             MprisCommand::SetDuration(secs) => {
                 let us = (secs * 1_000_000.0).max(0.0) as i64;
-                {
+                let should_notify = {
                     let mut s = shared.write().await;
+                    let existing = s.metadata.get("mpris:length").and_then(|v| match &**v {
+                        Value::I64(val) => Some(*val),
+                        _ => None,
+                    });
                     s.metadata
                         .insert("mpris:length".to_string(), to_owned_value(us));
+                    match existing {
+                        None => true,
+                        Some(prev_us) => (prev_us - us).abs() > 2_000_000,
+                    }
+                };
+                if should_notify {
+                    let player = iface_ref.get().await;
+                    let _ = player.metadata_changed(iface_ref.signal_emitter()).await;
                 }
-                let player = iface_ref.get().await;
-                let _ = player.metadata_changed(iface_ref.signal_emitter()).await;
             }
             MprisCommand::SetPlayback { playing, pos: _ } => {
                 let status = if playing { "Playing" } else { "Paused" };
