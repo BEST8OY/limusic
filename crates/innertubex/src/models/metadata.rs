@@ -722,7 +722,7 @@ fn like_status(node: &Value) -> Option<Rating> {
     })
 }
 
-fn parse_panel_video(node: &Value) -> Option<SongItem> {
+pub fn parse_panel_video(node: &Value) -> Option<SongItem> {
     let video_id = node.get("videoId").and_then(Value::as_str)?.to_owned();
     let title = runs_text(node.get("title"))?;
     let byline = node.get("longBylineText").or_else(|| node.get("shortBylineText"));

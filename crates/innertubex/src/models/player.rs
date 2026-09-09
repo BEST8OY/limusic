@@ -27,6 +27,22 @@ fn deserialize_opt_i64_lenient<'de, D: Deserializer<'de>>(
     deserialize_i64_lenient(deserializer).map(Some)
 }
 
+fn deserialize_opt_i32_lenient<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i32>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrI32 {
+        String(String),
+        I32(i32),
+    }
+    match Option::<StringOrI32>::deserialize(deserializer)? {
+        Some(StringOrI32::String(s)) => s.parse().map(Some).map_err(serde::de::Error::custom),
+        Some(StringOrI32::I32(n)) => Ok(Some(n)),
+        None => Ok(None),
+    }
+}
+
 /// `/player` request body. context/03.
 ///
 /// Phase 1 never sends `playbackContext` (needs STS/cipher) or `serviceIntegrityDimensions`
@@ -44,6 +60,8 @@ pub struct PlayerBody {
     pub service_integrity_dimensions: Option<ServiceIntegrityDimensions>,
     pub content_check_ok: bool,
     pub racy_check_ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_check_ok: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,10 +70,15 @@ pub struct PlaybackContext {
     pub content_playback_context: ContentPlaybackContext,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentPlaybackContext {
-    pub signature_timestamp: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html5_preference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_timestamp: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_host_flags: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +122,9 @@ impl PlayabilityStatus {
                 | "LOGIN_REQUIRED"
                 | "CONTENT_CHECK_REQUIRED"
         )
+    }
+    pub fn is_explicit(&self) -> bool {
+        self.is_age_gated() || self.status == "CONTENT_CHECK_REQUIRED"
     }
 }
 
@@ -155,6 +181,8 @@ pub struct Format {
     pub approx_duration_ms: Option<String>,
     #[serde(default)]
     pub audio_channels: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_opt_i32_lenient")]
+    pub audio_sample_rate: Option<i32>,
     #[serde(default)]
     pub loudness_db: Option<f64>,
     #[serde(default)]
@@ -193,6 +221,7 @@ impl Format {
     pub fn cipher_string(&self) -> Option<&str> {
         self.signature_cipher.as_deref().or(self.cipher.as_deref())
     }
+    #[allow(dead_code)]
     fn quality_rank(&self) -> u8 {
         match self.audio_quality.as_deref() {
             Some("AUDIO_QUALITY_HIGH") => 3,
@@ -201,6 +230,7 @@ impl Format {
             _ => 0,
         }
     }
+    #[allow(dead_code)]
     fn codec_score(&self) -> u8 {
         if self.mime_type.contains("opus") {
             2
@@ -218,41 +248,133 @@ pub enum AudioQuality {
     Low,
     /// Desktop has no metered-network concept → treat AUTO as "prefer HIGH" (context/12).
     Auto,
+    Mp4,
 }
 
-/// Pick the best audio format for the requested quality. Port of `YTPlayerUtils.findFormat`,
-/// context/03. Returns a reference into `adaptive_formats`.
-pub fn find_format(data: &StreamingData, quality: AudioQuality) -> Option<&Format> {
-    let audio: Vec<&Format> = data.adaptive_formats.iter().filter(|f| f.is_audio()).collect();
-    if audio.is_empty() {
+/// Score an audio format based on codec quality, channel count, bitrate, and sample rate.
+/// Port of MetrolistGroup/innertubex `audioFormatScore`.
+pub fn audio_format_score(format: &Format) -> i64 {
+    let codec_rank: i64 = if format.mime_type.contains("audio/webm") || format.mime_type.contains("opus") {
+        100
+    } else if format.mime_type.contains("audio/mp4") || format.mime_type.contains("mp4a") {
+        50
+    } else {
+        0
+    };
+    let channels = format.audio_channels.unwrap_or(2);
+    let channel_bonus: i64 = match channels {
+        2 => 50_000,
+        1 => 0,
+        _ => 25_000,
+    };
+    let sample_rate = (format.audio_sample_rate.unwrap_or(0) as i64).clamp(0, 48_000);
+    codec_rank * 1_000_000 + channel_bonus + format.bitrate + (sample_rate / 10)
+}
+
+/// Pick the best audio format matching the requested quality.
+/// Port of MetrolistGroup/innertubex `selectBestAudioFormat`.
+pub fn select_best_audio_format<'a>(
+    formats: &'a [Format],
+    quality: AudioQuality,
+    require_url: bool,
+) -> Option<&'a Format> {
+    let valid: Vec<&'a Format> = formats
+        .iter()
+        .filter(|f| f.is_audio() && (!require_url || f.url.as_deref().is_some_and(|u| !u.is_empty())))
+        .collect();
+    if valid.is_empty() {
         return None;
     }
     match quality {
-        AudioQuality::High | AudioQuality::Auto => audio.into_iter().max_by(|a, b| {
-            a.quality_rank()
-                .cmp(&b.quality_rank())
-                .then(a.audio_channels.unwrap_or(2).cmp(&b.audio_channels.unwrap_or(2)))
-                .then(a.codec_score().cmp(&b.codec_score()))
-                .then(a.bitrate.cmp(&b.bitrate))
-        }),
-        AudioQuality::Low => {
-            let capped: Vec<&&Format> = audio.iter().filter(|f| f.bitrate <= 128_000).collect();
-            let pool = if capped.is_empty() { audio.iter().collect() } else { capped };
-            // Prefer original (non-dubbed), then highest bitrate under the cap.
-            pool.into_iter()
-                .max_by(|a, b| {
-                    a.is_original().cmp(&b.is_original()).then(a.bitrate.cmp(&b.bitrate))
-                })
-                .copied()
-        }
+        AudioQuality::Low => valid
+            .iter()
+            .filter(|f| f.mime_type.contains("audio/mp4"))
+            .min_by_key(|f| f.bitrate)
+            .or_else(|| valid.iter().min_by_key(|f| f.bitrate))
+            .copied(),
+        AudioQuality::Auto => valid
+            .iter()
+            .filter(|f| f.mime_type.contains("audio/webm"))
+            .max_by_key(|f| audio_format_score(f))
+            .or_else(|| valid.iter().max_by_key(|f| audio_format_score(f)))
+            .copied(),
+        AudioQuality::High => valid.iter().max_by_key(|f| audio_format_score(f)).copied(),
+        AudioQuality::Mp4 => valid
+            .iter()
+            .filter(|f| f.mime_type.contains("audio/mp4"))
+            .max_by_key(|f| audio_format_score(f))
+            .copied(),
     }
+}
+
+/// Pick the best audio format for the requested quality from `StreamingData`.
+/// Backwards-compatible facade calling `select_best_audio_format`.
+pub fn find_format(data: &StreamingData, quality: AudioQuality) -> Option<&Format> {
+    select_best_audio_format(&data.adaptive_formats, quality, false)
+}
+
+/// Pick the best video format at or below `max_height`.
+/// Port of MetrolistGroup/innertubex `selectBestVideoFormat`.
+pub fn select_best_video_format<'a>(
+    formats: &'a [Format],
+    require_url: bool,
+    max_height: i32,
+) -> Option<&'a Format> {
+    let valid: Vec<&'a Format> = formats
+        .iter()
+        .filter(|f| {
+            f.width.is_some()
+                && f.height.unwrap_or(0) > 0
+                && (!require_url || f.url.as_deref().is_some_and(|u| !u.is_empty()))
+        })
+        .collect();
+    if valid.is_empty() {
+        return None;
+    }
+
+    let within_cap: Vec<&'a Format> = valid
+        .iter()
+        .copied()
+        .filter(|f| f.height.unwrap_or(0) <= max_height)
+        .collect();
+
+    let pool = if !within_cap.is_empty() {
+        within_cap
+    } else {
+        let min_height = valid.iter().map(|f| f.height.unwrap_or(0)).min()?;
+        valid.into_iter().filter(|f| f.height.unwrap_or(0) == min_height).collect()
+    };
+
+    let codec_rank = |f: &Format| {
+        let m = f.mime_type.to_lowercase();
+        if m.contains("av01") {
+            1
+        } else if m.contains("avc1")
+            || m.contains("vp09")
+            || m.contains("vp9")
+            || m.contains("video/mp4")
+            || m.contains("video/webm")
+        {
+            2
+        } else {
+            0
+        }
+    };
+
+    pool.into_iter().max_by(|a, b| {
+        a.height
+            .unwrap_or(0)
+            .cmp(&b.height.unwrap_or(0))
+            .then(codec_rank(a).cmp(&codec_rank(b)))
+            .then(b.bitrate.cmp(&a.bitrate))
+    })
 }
 
 /// Best VP9 video-only format at or below `max_height`, for the player view's music-video mode.
 ///
 /// Video-only: the audio still comes from mpv, which is playing the same videoId. VP9 rather than
 /// MP4 because a stock Fedora only ships openh264 (constrained baseline) and YouTube's 720p/1080p
-/// MP4 is High profile, so itag 137 would fail for those users. context/03.
+/// MP4 is High profile, so itag 137 would fail for those users.
 pub fn find_video_format(data: &StreamingData, max_height: i32) -> Option<&Format> {
     data.adaptive_formats
         .iter()
@@ -261,7 +383,6 @@ pub fn find_video_format(data: &StreamingData, max_height: i32) -> Option<&Forma
                 && f.mime_type.contains("vp9")
                 && f.height.is_some_and(|h| h <= max_height)
         })
-        // Biggest picture that fits, then the smoother of a 30/60fps pair, then the better encode.
         .max_by(|a, b| {
             a.height
                 .cmp(&b.height)

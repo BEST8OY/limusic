@@ -49,12 +49,17 @@ impl InnerTube {
             video_id: video_id.to_owned(),
             playlist_id: playlist_id.map(str::to_owned),
             playback_context: sts.map(|signature_timestamp| PlaybackContext {
-                content_playback_context: ContentPlaybackContext { signature_timestamp },
+                content_playback_context: ContentPlaybackContext {
+                    html5_preference: None,
+                    signature_timestamp: Some(signature_timestamp),
+                    encrypted_host_flags: None,
+                },
             }),
             service_integrity_dimensions: po_token
                 .map(|t| ServiceIntegrityDimensions { po_token: t.to_owned() }),
             content_check_ok: true,
             racy_check_ok: true,
+            video_check_ok: Some(true),
         };
         let value = self.post("player", client, &body, /* set_login */ true).await?;
         Ok(serde_json::from_value(value)?)
@@ -945,6 +950,245 @@ impl InnerTube {
         let body =
             SubBody { context: self.context_for(client), channel_ids: vec![channel_id.to_owned()] };
         self.post(path, client, &body, true).await?;
+        Ok(())
+    }
+
+    /// Search suggestions matching MetrolistGroup/innertubex `getSearchSuggestions`.
+    pub async fn get_search_suggestions(
+        &self,
+        client: &YouTubeClient,
+        input: &str,
+    ) -> Result<Vec<String>, Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SuggestionBody {
+            context: Context,
+            input: String,
+        }
+        let body = SuggestionBody {
+            context: self.context_for(client),
+            input: input.to_owned(),
+        };
+        let root: serde_json::Value = self.post("music/get_search_suggestions", client, &body, false).await?;
+        let mut suggestions = Vec::new();
+        if let Some(contents) = root.get("contents").and_then(|c| c.as_array()) {
+            for section in contents {
+                if let Some(items) = section
+                    .get("searchSuggestionsSectionRenderer")
+                    .and_then(|s| s.get("contents"))
+                    .and_then(|c| c.as_array())
+                {
+                    for item in items {
+                        let text = item
+                            .get("searchSuggestionRenderer")
+                            .or_else(|| item.get("historySuggestionRenderer"))
+                            .and_then(|r| r.get("suggestion"))
+                            .and_then(|s| s.get("runs"))
+                            .and_then(|r| r.as_array())
+                            .map(|runs| {
+                                runs.iter()
+                                    .filter_map(|r| r.get("text").and_then(|t| t.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join("")
+                            });
+                        if let Some(t) = text {
+                            let trimmed = t.trim();
+                            if !trimmed.is_empty() && !suggestions.contains(&trimmed.to_owned()) {
+                                suggestions.push(trimmed.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(suggestions)
+    }
+
+    /// Fetch player queue matching MetrolistGroup/innertubex `getQueue`.
+    pub async fn get_queue(
+        &self,
+        client: &YouTubeClient,
+        video_ids: Option<&[String]>,
+        playlist_id: Option<&str>,
+    ) -> Result<Vec<SongItem>, Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct QueueBody {
+            context: Context,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            video_ids: Option<Vec<String>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            playlist_id: Option<String>,
+        }
+        let body = QueueBody {
+            context: self.context_for(client),
+            video_ids: video_ids.map(|v| v.to_vec()),
+            playlist_id: playlist_id.map(str::to_owned),
+        };
+        let root: serde_json::Value = self.post("music/get_queue", client, &body, self.is_logged_in()).await?;
+        let mut items = Vec::new();
+        if let Some(queue_datas) = root.get("queueDatas").and_then(|q| q.as_array()) {
+            for qd in queue_datas {
+                if let Some(panel) = qd.get("content").and_then(|c| c.get("playlistPanelVideoRenderer")) {
+                    if let Some(item) = metadata::parse_panel_video(panel) {
+                        items.push(item);
+                    }
+                }
+            }
+        }
+        Ok(items)
+    }
+
+    /// Fetch official video transcript cues matching MetrolistGroup/innertubex `transcriptCues`.
+    pub async fn get_transcript(
+        &self,
+        client: &YouTubeClient,
+        video_id: &str,
+    ) -> Result<Vec<lyrics::TranscriptCue>, Error> {
+        use base64::Engine;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct TranscriptBody {
+            context: Context,
+            params: String,
+        }
+        let raw_params = format!("\n\x0b{video_id}");
+        let params = base64::engine::general_purpose::STANDARD.encode(raw_params.as_bytes());
+        let body = TranscriptBody {
+            context: self.context_for(client),
+            params,
+        };
+        let root: serde_json::Value = self.post("get_transcript", client, &body, false).await?;
+        let mut cues = Vec::new();
+        let groups = root
+            .get("actions")
+            .and_then(|a| a.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|act| act.get("updateEngagementPanelAction"))
+            .and_then(|u| u.get("content"))
+            .and_then(|c| c.get("transcriptRenderer"))
+            .and_then(|t| t.get("body"))
+            .and_then(|b| b.get("transcriptBodyRenderer"))
+            .and_then(|tb| tb.get("cueGroups"))
+            .and_then(|cg| cg.as_array());
+
+        if let Some(groups) = groups {
+            for group in groups {
+                let cue_renderer = group
+                    .get("transcriptCueGroupRenderer")
+                    .and_then(|tcg| tcg.get("cues"))
+                    .and_then(|c| c.as_array())
+                    .and_then(|cues_arr| cues_arr.first())
+                    .and_then(|first| first.get("transcriptCueRenderer"));
+
+                if let Some(cue) = cue_renderer {
+                    let text = cue
+                        .get("cue")
+                        .and_then(|c| c.get("simpleText"))
+                        .and_then(|s| s.as_str())
+                        .map(|t| t.trim_matches('\u{266a}').trim())
+                        .unwrap_or_default();
+
+                    let start_ms = cue
+                        .get("startOffsetMs")
+                        .and_then(|s| s.as_str().and_then(|v| v.parse::<i64>().ok()).or_else(|| s.as_i64()))
+                        .unwrap_or(0);
+                    let duration_ms = cue
+                        .get("durationMs")
+                        .and_then(|d| d.as_str().and_then(|v| v.parse::<i64>().ok()).or_else(|| d.as_i64()))
+                        .unwrap_or(0);
+
+                    if !text.is_empty() {
+                        cues.push(lyrics::TranscriptCue {
+                            text: text.to_owned(),
+                            start_ms,
+                            duration_ms,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(cues)
+    }
+
+    /// Fetch raw captions from YouTube timedtext endpoint matching MetrolistGroup/innertubex `fetchCaptionText`.
+    pub async fn fetch_caption_text(&self, url: &str) -> Result<String, Error> {
+        let validated = crate::transport::validated_caption_url(url)?;
+        let resp = self.http.get(&validated).send().await.map_err(|e| Error::Other(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(Error::Other(format!("caption request failed with status {}", resp.status())));
+        }
+        let text = resp.text().await.map_err(|e| Error::Other(e.to_string()))?;
+        Ok(text)
+    }
+
+    /// Delete a privately-owned upload entity matching MetrolistGroup/innertubex `deletePrivatelyOwnedEntity`.
+    pub async fn delete_privately_owned_entity(
+        &self,
+        client: &YouTubeClient,
+        entity_id: &str,
+    ) -> Result<(), Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct DeleteBody {
+            context: Context,
+            entity_id: String,
+        }
+        let body = DeleteBody {
+            context: self.context_for(client),
+            entity_id: entity_id.to_owned(),
+        };
+        self.post("music/delete_privately_owned_entity", client, &body, true).await?;
+        Ok(())
+    }
+
+    /// Upload a song to YouTube Music user library matching MetrolistGroup/innertubex `uploadSong`.
+    pub async fn upload_song(
+        &self,
+        client: &YouTubeClient,
+        file_name: &str,
+        data: Vec<u8>,
+    ) -> Result<(), Error> {
+        let auth_user = self.auth_user().unwrap_or_else(|| "0".to_owned());
+        let start_path = format!("upload/usermusic/http?authuser={auth_user}");
+        let form_body = format!("filename={}", urlencoding::encode(file_name)).into_bytes();
+        let (headers, _) = self
+            .post_upload(
+                &start_path,
+                client,
+                &[
+                    ("x-goog-upload-command", "start".to_owned()),
+                    ("x-goog-upload-protocol", "resumable".to_owned()),
+                    ("x-goog-upload-header-content-length", data.len().to_string()),
+                    ("content-type", "application/x-www-form-urlencoded".to_owned()),
+                ],
+                form_body,
+            )
+            .await?;
+
+        let upload_url = headers
+            .get("x-goog-upload-url")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| Error::Other("missing X-Goog-Upload-URL header".into()))?;
+
+        let validated_url = crate::transport::validated_upload_url(upload_url)?;
+        let mut finalize_headers = self.headers(client, &validated_url, true);
+        finalize_headers.insert(
+            reqwest::header::HeaderName::from_static("x-goog-upload-command"),
+            reqwest::header::HeaderValue::from_static("upload, finalize"),
+        );
+        finalize_headers.insert(
+            reqwest::header::HeaderName::from_static("x-goog-upload-offset"),
+            reqwest::header::HeaderValue::from_static("0"),
+        );
+        finalize_headers.insert(
+            reqwest::header::HeaderName::from_static("content-type"),
+            reqwest::header::HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        let resp = self.http.post(&validated_url).headers(finalize_headers).body(data).send().await?;
+        if !resp.status().is_success() {
+            return Err(Error::Other(format!("upload finalize failed with HTTP {}", resp.status())));
+        }
         Ok(())
     }
 }

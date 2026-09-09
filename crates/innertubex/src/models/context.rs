@@ -17,6 +17,13 @@ impl Default for Locale {
     }
 }
 
+impl Locale {
+    /// Format the Accept-Language header string matching MetrolistGroup/innertubex.
+    pub fn accept_language_header(&self) -> String {
+        format!("{}-{},{};q=0.9,en-US;q=0.8,en;q=0.7", self.hl, self.gl, self.hl)
+    }
+}
+
 // The three load-bearing JSON flags (context/01) are realized structurally here:
 // - ignoreUnknownKeys → serde ignores unknown fields on Deserialize by default.
 // - explicitNulls = false → `skip_serializing_if = "Option::is_none"` on every Option.
@@ -38,6 +45,8 @@ pub struct Client {
     pub client_name: String,
     pub client_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub os_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os_version: Option<String>,
@@ -47,6 +56,8 @@ pub struct Client {
     pub device_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub android_sdk_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     pub gl: String,
     pub hl: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,18 +104,24 @@ impl YouTubeClient {
             client: Client {
                 client_name: self.client_name.clone(),
                 client_version: self.client_version.clone(),
+                user_agent: if self.include_user_agent_in_context {
+                    Some(self.user_agent.clone())
+                } else {
+                    None
+                },
                 os_name: self.os_name.clone(),
                 os_version: self.os_version.clone(),
                 device_make: self.device_make.clone(),
                 device_model: self.device_model.clone(),
                 android_sdk_version: self.android_sdk_version.clone(),
+                platform: self.platform.clone(),
                 gl: locale.gl.clone(),
                 hl: locale.hl.clone(),
                 visitor_data: visitor_data.map(str::to_owned),
             },
             third_party: self.is_embedded.then(|| ThirdParty {
                 // embedUrl is filled per-video by the /player builder for embedded clients.
-                embed_url: String::new(),
+                embed_url: String::from("https://www.reddit.com/"),
             }),
             request: Request::default(),
             user: User {

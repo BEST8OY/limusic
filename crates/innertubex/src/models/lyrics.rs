@@ -25,6 +25,15 @@ pub struct PlainLyrics {
     pub footer: Option<String>,
 }
 
+/// One cue in a YouTube transcript track. Port of MetrolistGroup/innertubex `TranscriptCue`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptCue {
+    pub text: String,
+    pub start_ms: i64,
+    pub duration_ms: i64,
+}
+
 /// Pull the synced lines out of a mobile-client lyrics browse response. Empty when the track has
 /// no timed lyrics (the response degrades to a plain-text description or an error message).
 pub fn parse_lyrics_timed(root: &Value) -> Vec<TimedLyricLine> {
