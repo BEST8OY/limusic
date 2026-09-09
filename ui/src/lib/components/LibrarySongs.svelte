@@ -5,7 +5,7 @@
 	// `FEmusic_liked_videos` is YouTube's own Library ▸ Songs despite the name, and
 	// `FEmusic_library_privately_owned_tracks` is Uploads ▸ Songs. Both browse like any other
 	// playlist, so this reads them through `get_playlist` and the Rust side gains nothing.
-	// What pins that: `library_songs_browse_returns_tracks` in crates/innertube/tests/live_smoke.rs.
+	// What pins that: `library_songs_browse_returns_tracks` in crates/innertubex/tests/live_smoke.rs.
 	import { onMount } from 'svelte';
 	import { HugeiconsIcon } from '@hugeicons/svelte';
 	import {
