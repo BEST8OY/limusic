@@ -120,7 +120,7 @@ async fn fetch(state: &AppState, mut req: LyricsRequest) -> (Option<Lyrics>, boo
     } else {
         match state
             .it
-            .next(state.clients.get(innertube::METADATA_CLIENT).unwrap(), Some(&req.video_id), None)
+            .next(state.clients.get(innertubex::METADATA_CLIENT).unwrap(), Some(&req.video_id), None)
             .await
         {
             Ok(n) => Some(n),
@@ -187,7 +187,7 @@ async fn fetch(state: &AppState, mut req: LyricsRequest) -> (Option<Lyrics>, boo
         definitive = true; // a next() answer with no lyrics tab IS "YT has no lyrics"
     }
     if let (Some(bid), Some(client)) =
-        (&browse_id, state.clients.get(innertube::LYRICS_TIMED_CLIENT))
+        (&browse_id, state.clients.get(innertubex::LYRICS_TIMED_CLIENT))
     {
         match state.it.lyrics_timed(client, bid).await {
             Ok(lines) if !lines.is_empty() => {
@@ -245,7 +245,7 @@ async fn fetch(state: &AppState, mut req: LyricsRequest) -> (Option<Lyrics>, boo
 
     // 4b. Plain from YT (WEB_REMIX).
     if let Some(bid) = &browse_id {
-        if let Some(client) = state.clients.get(innertube::METADATA_CLIENT) {
+        if let Some(client) = state.clients.get(innertubex::METADATA_CLIENT) {
             match state.it.lyrics_plain(client, bid).await {
                 Ok(Some(p)) => {
                     // Footer is YT's own attribution ("Source: Musixmatch") — surface it.

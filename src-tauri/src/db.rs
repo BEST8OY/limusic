@@ -18,7 +18,7 @@ pub struct Db(Mutex<Connection>);
 /// `None` for a jar with no SAPISID, which is not a signed-in session at all: every caller needs
 /// to skip such a cookie rather than file it under a key shared with every other broken jar.
 pub fn account_key(session_cookie: &str) -> Option<String> {
-    let sapisid = innertube::cookie_sapisid(session_cookie)?;
+    let sapisid = innertubex::cookie_sapisid(session_cookie)?;
     let mut digest = Md5::new();
     digest.update(b"limusic-google-account-v1");
     digest.update(sapisid.as_bytes());

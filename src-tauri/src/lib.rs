@@ -29,7 +29,7 @@ mod webview;
 use std::sync::Arc;
 use std::time::Duration;
 
-use innertube::{Clients, InnerTube, Locale, Session};
+use innertubex::{Clients, InnerTube, Locale, Session};
 use player::{Player, PlayerEvent};
 use tauri::{Emitter, Manager};
 
@@ -321,7 +321,7 @@ pub fn run() {
             }
 
             let visitor_for_prewarm = visitor_data.clone();
-            let session = Session { locale: Locale::default(), visitor_data, data_sync_id, cookie };
+            let session = Session { locale: Locale::default(), visitor_data, data_sync_id, cookie, ..Session::default() };
             let it = InnerTube::new(session, proxy.as_deref()).expect("build InnerTube");
             it.set_hide_videos(db.get_setting("hide_videos").as_deref() == Some("true"));
             // Read while `db` is still ours; the window is decorated further down, once the rest of
@@ -464,7 +464,7 @@ pub fn run() {
                     // screen to run into the dead session and report it. One request, and the
                     // 401 it may come back with goes down the same healing path as any other.
                     if st.it.is_logged_in() {
-                        if let Some(client) = st.clients.get(innertube::METADATA_CLIENT) {
+                        if let Some(client) = st.clients.get(innertubex::METADATA_CLIENT) {
                             let _ = st.it.account_menu(client).await;
                         }
                     }

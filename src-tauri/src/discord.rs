@@ -42,7 +42,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
-use innertube::SongItem;
+use innertubex::SongItem;
 
 /// Discord application id (a snowflake — digits only). **Must be set before rich presence does
 /// anything.** Register an app named "Limusic" at <https://discord.com/developers/applications> and

@@ -265,7 +265,7 @@ impl MprisPlayer {
         if let Some(state) = self.app.try_state::<Arc<AppState>>() {
             let state = state.inner().clone();
             if let Some(path) = uri.strip_prefix("file://") {
-                let item = innertube::SongItem {
+                let item = innertubex::SongItem {
                     video_id: format!("{}{path}", crate::local::SONG_PREFIX),
                     title: std::path::Path::new(path)
                         .file_stem()

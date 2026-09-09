@@ -74,7 +74,7 @@ pub fn open_login(app: AppHandle, state: Arc<AppState>, add_account: bool) {
                 // after the page finishes, so poll briefly.
                 for _ in 0..6 {
                     let cookie = read_login_cookies(&app, LOGIN_LABEL).await;
-                    if innertube::cookie_sapisid(&cookie).is_some() {
+                    if innertubex::cookie_sapisid(&cookie).is_some() {
                         match state.sign_in(cookie, None).await {
                             Ok(SignInOutcome::Complete) => {
                                 let _ = app.emit("login-done", ());
@@ -214,12 +214,12 @@ pub async fn refresh_session(app: AppHandle, state: Arc<AppState>) {
     // sign back into it behind the user.
     for _ in 0..8 {
         let current = state.it.cookie().unwrap_or_default();
-        let Some(account) = innertube::cookie_sapisid(&current) else {
+        let Some(account) = innertubex::cookie_sapisid(&current) else {
             close(&app, REFRESH_LABEL);
             return;
         };
         let cookie = read_login_cookies(&app, REFRESH_LABEL).await;
-        if innertube::cookie_sapisid(&cookie) == Some(account) && !same_jar(&cookie, &current) {
+        if innertubex::cookie_sapisid(&cookie) == Some(account) && !same_jar(&cookie, &current) {
             // The switch could still land during the export above, so the account is checked once
             // more under `AppState::auth`, where nothing can move underneath it.
             match state.sign_in(cookie, Some(account)).await {
@@ -353,7 +353,7 @@ mod tests {
         ]);
         assert_eq!(header, "SAPISID=abc; SID=def; VISITOR_INFO1_LIVE=xyz");
         // The check open_login gates on: no SAPISID means sign-in silently gives up.
-        assert_eq!(innertube::cookie_sapisid(&header), Some("abc"));
+        assert_eq!(innertubex::cookie_sapisid(&header), Some("abc"));
     }
 
     #[test]

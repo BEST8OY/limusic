@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use innertube::{
+use innertubex::{
     AlbumPage, ArtistPage, BrowseItem, HistoryGroup, HomePage, PlaylistContinuation, PlaylistPage,
     PlaylistSort, Rating, SearchResults, SongItem,
 };
@@ -16,7 +16,7 @@ type St<'a> = State<'a, Arc<AppState>>;
 
 #[tauri::command]
 pub async fn search(state: St<'_>, query: String) -> Result<Vec<SongItem>, String> {
-    let client = state.clients.get(innertube::METADATA_CLIENT).ok_or("metadata client missing")?;
+    let client = state.clients.get(innertubex::METADATA_CLIENT).ok_or("metadata client missing")?;
     let result = state.it.search_songs(client, &query).await.map_err(|e| e.to_string())?;
     Ok(result.items)
 }
@@ -322,8 +322,8 @@ pub async fn set_setting(
 /// come from the innertube crate so the UI stays free of YouTube-shaped identity strings.
 #[tauri::command]
 pub async fn get_stream_clients() -> Result<Vec<String>, String> {
-    let mut v = vec![innertube::MAIN_CLIENT.to_string()];
-    v.extend(innertube::STREAM_FALLBACK_ORDER.iter().map(|s| s.to_string()));
+    let mut v = vec![innertubex::MAIN_CLIENT.to_string()];
+    v.extend(innertubex::STREAM_FALLBACK_ORDER.iter().map(|s| s.to_string()));
     Ok(v)
 }
 
@@ -541,8 +541,8 @@ pub async fn close_mini(app: tauri::AppHandle) -> Result<(), String> {
 
 // --- browse / library (context/08) ---------------------------------------------------------
 
-fn metadata_client(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
-    state.clients.get(innertube::METADATA_CLIENT).ok_or_else(|| "metadata client missing".into())
+fn metadata_client(state: &Arc<AppState>) -> Result<&innertubex::YouTubeClient, String> {
+    state.clients.get(innertubex::METADATA_CLIENT).ok_or_else(|| "metadata client missing".into())
 }
 
 #[tauri::command]
@@ -823,7 +823,7 @@ pub async fn start_radio(
 
 // --- write actions (context/01 ✎, context/15) ----------------------------------------------
 
-fn require_login(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, String> {
+fn require_login(state: &Arc<AppState>) -> Result<&innertubex::YouTubeClient, String> {
     if !state.it.is_logged_in() {
         return Err("Sign in first to use this.".into());
     }
@@ -868,7 +868,7 @@ pub async fn set_album_saved(
 fn editable_playlist<'a>(
     state: &'a Arc<AppState>,
     playlist_id: &str,
-) -> Result<&'a innertube::YouTubeClient, String> {
+) -> Result<&'a innertubex::YouTubeClient, String> {
     if playlist_id == ON_REPEAT_ID {
         return Err("On Repeat builds itself from what you play.".into());
     }
@@ -1149,14 +1149,14 @@ fn sync_cover(state: &Arc<AppState>, playlist_id: &str, path: String) {
     let state = Arc::clone(state);
     let playlist_id = playlist_id.to_owned();
     tauri::async_runtime::spawn(async move {
-        let Some(client) = state.clients.get(innertube::METADATA_CLIENT) else {
+        let Some(client) = state.clients.get(innertubex::METADATA_CLIENT) else {
             return;
         };
         // Read here, not on the command's thread: the file was just written and the caller has its
         // answer already.
         let result = match std::fs::read(&path) {
             Ok(image) => state.it.playlist_set_cover(client, &playlist_id, image).await,
-            Err(e) => Err(innertube::Error::Other(e.to_string())),
+            Err(e) => Err(innertubex::Error::Other(e.to_string())),
         };
         match result {
             // Remembered so a later removal knows whether YouTube has anything of ours to drop.
@@ -1166,7 +1166,7 @@ fn sync_cover(state: &Arc<AppState>, playlist_id: &str, path: String) {
                 let message = match e {
                     // The one refusal with a known cause and no fix inside this app. Say it once,
                     // plainly, and leave the cover where it already is: on this machine.
-                    innertube::Error::CoverRefused => format!("Artwork saved on this device. {e}"),
+                    innertubex::Error::CoverRefused => format!("Artwork saved on this device. {e}"),
                     e => format!("Artwork saved here, but the upload to YouTube Music failed: {e}"),
                 };
                 let _ = state.app.emit("cover-error", serde_json::json!({ "message": message }));

@@ -746,7 +746,7 @@ mod tests {
         let live_addr = live.local_addr().unwrap();
         // 198.51.100.0/24 is TEST-NET-2: routed nowhere, so this either hangs (→ our timeout) or
         // errors out, which is exactly the fall-through we want to exercise.
-        let dead: SocketAddr = "198.51.100.1:443".parse().unwrap();
+        let dead: SocketAddr = "198.51.100.1:54321".parse().unwrap();
 
         let t = std::time::Instant::now();
         let s = connect_first(&[dead, live_addr]).await.expect("should reach the live address");

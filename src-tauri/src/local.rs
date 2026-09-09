@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use innertube::{AlbumPage, BrowseItem, SongItem};
+use innertubex::{AlbumPage, BrowseItem, SongItem};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::{Accessor, ItemKey};
 

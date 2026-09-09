@@ -80,8 +80,8 @@ fn add(l: &mut Vec<BlockedArtist>, entry: BlockedArtist) {
 }
 
 /// The predicate the transport applies, built from the stored list.
-pub fn block_list(db: &Db) -> innertube::BlockList {
-    innertube::BlockList::new(list(db).into_iter().map(|b| (b.id, b.name)))
+pub fn block_list(db: &Db) -> innertubex::BlockList {
+    innertubex::BlockList::new(list(db).into_iter().map(|b| (b.id, b.name)))
 }
 
 #[cfg(test)]

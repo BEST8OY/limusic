@@ -12,9 +12,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use innertube::{
-    find_format, find_video_format, rustypipe_fallback, AudioQuality, Clients, Format, InnerTube,
-    PlayerResponse, MAIN_CLIENT, STREAM_FALLBACK_ORDER, UPLOAD_FALLBACK_ORDER,
+use innertubex::{
+    find_format, find_video_format, rustypipe_fallback, validated_media_url, AudioQuality, Clients,
+    ContentAwareFallbackStrategy, Format, InnerTube, PlayerResponse, MAIN_CLIENT,
+    STREAM_FALLBACK_ORDER, UPLOAD_FALLBACK_ORDER,
 };
 use tokio::sync::Mutex;
 
@@ -147,10 +148,6 @@ impl Orchestrator {
         let prefer_high = matches!(quality, AudioQuality::High | AudioQuality::Auto);
         let logged_in = self.it.is_logged_in();
         let visitor = self.it.visitor_data();
-        // An upload only streams to an authenticated client, so it gets its own chain and never
-        // falls through to the anonymous ones (context: clients::UPLOAD_FALLBACK_ORDER, issue #71).
-        let order: &[&str] =
-            if is_upload { &UPLOAD_FALLBACK_ORDER } else { &STREAM_FALLBACK_ORDER };
         // Without the uploads-playlist context YouTube hands back upload URLs that expire in about
         // 32 seconds (Metrolist PR #3857). Harmless for ordinary tracks, so scoped to uploads.
         let playlist_id = is_upload.then_some("MLPT");
@@ -213,13 +210,39 @@ impl Orchestrator {
         let main_ping = main_resp.as_ref().and_then(|r| playback_ping(r, main_key));
 
         // 4. Fallback loop. idx == -1 reuses the main response; 0.. are the fallback clients.
+        // Determine fallback client candidates using MetrolistGroup/innertubex ContentAwareFallbackStrategy.
+        let is_explicit = main_resp.as_ref().is_some_and(|r| r.playability_status.is_explicit());
+        let hints = innertubex::ContentHints {
+            is_explicit: Some(is_explicit),
+            is_uploaded: Some(is_upload),
+            is_age_restricted: Some(is_explicit),
+            ..Default::default()
+        };
+        let strategy = ContentAwareFallbackStrategy::default();
+        let dynamic_clients = strategy.select_clients(&self.clients, &hints, logged_in, disabled);
+        let fallback_keys: Vec<&str> = if is_upload {
+            UPLOAD_FALLBACK_ORDER.to_vec()
+        } else {
+            let mut keys: Vec<&str> = dynamic_clients
+                .iter()
+                .map(|s| s.manifest.client_key)
+                .filter(|k| *k != MAIN_CLIENT && self.clients.get(*k).is_some())
+                .collect();
+            for fb in STREAM_FALLBACK_ORDER {
+                if !keys.contains(&fb) && self.clients.get(fb).is_some() {
+                    keys.push(fb);
+                }
+            }
+            keys
+        };
+        let order: &[&str] = &fallback_keys;
         let mut best: Option<Candidate> = None;
         // A login client's upload URL that failed HEAD. Used only if nothing validates.
         let mut upload_fallback: Option<Candidate> = None;
-        let last_idx = order.len() as isize - 1;
+        let last_idx: isize = order.len() as isize - 1;
 
-        for idx in -1..=last_idx {
-            let (key, resp): (String, PlayerResponse) = if idx == -1 {
+        for idx in -1isize..=last_idx {
+            let (key, resp): (String, PlayerResponse) = if idx == -1isize {
                 // A WEB_REMIX stream that already died in the player is not retried for this
                 // video: it passed HEAD and failed anyway, so validation has nothing left to say.
                 // Uploads included. This used to exempt them, on the belief that skipping this
@@ -277,6 +300,12 @@ impl Orchestrator {
                 tracing::warn!(video_id, client = %key, itag = format.itag, "no stream URL (deciphering unavailable?)");
                 continue;
             };
+
+            // Innertubex security check: validate media URL scheme & host
+            if validated_media_url(&url).is_err() {
+                tracing::warn!(video_id, client = %key, url = %url, "stream URL failed host validation");
+                continue;
+            }
 
             // n-transform + &pot= for web clients (context/05, 06).
             let client = self.clients.get(&key);
@@ -463,8 +492,10 @@ impl Orchestrator {
             // Only ever a direct URL: these clients don't cipher, and a ciphered video is not worth
             // waking the cipher webview for.
             if let Some(url) = find_video_format(sd, max_height).and_then(|f| f.direct_url()) {
-                tracing::debug!(video_id, client = key, "video: resolved");
-                return Some(url.to_owned());
+                if validated_media_url(url).is_ok() {
+                    tracing::debug!(video_id, client = key, "video: resolved");
+                    return Some(url.to_owned());
+                }
             }
         }
         tracing::debug!(video_id, "video: no usable format");

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use std::sync::Arc;
 
-use innertube::{
+use innertubex::{
     AccountIdentity, AccountInfo, AudioQuality, BlockList, Clients, InnerTube, SongItem,
     MAIN_CLIENT,
 };
@@ -458,12 +458,12 @@ impl AppState {
         let _turn = self.auth.lock().await;
         if let Some(expect) = expect_account {
             let live = self.it.cookie().unwrap_or_default();
-            if innertube::cookie_sapisid(&live) != Some(expect) {
+            if innertubex::cookie_sapisid(&live) != Some(expect) {
                 return Err("The active account changed — skipping this sign-in.".into());
             }
         }
         let cookie = cookie.trim().to_owned();
-        if innertube::cookie_sapisid(&cookie).is_none() {
+        if innertubex::cookie_sapisid(&cookie).is_none() {
             return Err("Sign-in didn't complete — try signing in again.".into());
         }
         let previous_cookie = self.it.cookie();
@@ -479,7 +479,7 @@ impl AppState {
         // after the fresh accounts list proves that this cookie can act as it.
         self.it.set_data_sync_id(None);
         let client =
-            self.clients.get(innertube::METADATA_CLIENT).ok_or("metadata client missing")?;
+            self.clients.get(innertubex::METADATA_CLIENT).ok_or("metadata client missing")?;
         let active = match self.it.account_menu(client).await {
             // A valid, authenticating cookie returns the account header (name). No name means the
             // session didn't actually authenticate — reject it up front so we don't "succeed" into
@@ -640,7 +640,7 @@ impl AppState {
             return Err("Sign in before switching channels.".into());
         }
         let client =
-            self.clients.get(innertube::METADATA_CLIENT).ok_or("metadata client missing")?;
+            self.clients.get(innertubex::METADATA_CLIENT).ok_or("metadata client missing")?;
         let identities = self.it.account_identities(client).await.map_err(|e| e.to_string())?;
         let selected_id = self.it.data_sync_id();
         // Nothing is selected yet during a forced first pick, so YouTube's own default marker
@@ -668,7 +668,7 @@ impl AppState {
             return Err("Sign in before switching channels.".into());
         }
         let client =
-            self.clients.get(innertube::METADATA_CLIENT).ok_or("metadata client missing")?;
+            self.clients.get(innertubex::METADATA_CLIENT).ok_or("metadata client missing")?;
         let identities = self.it.account_identities(client).await.map_err(|e| e.to_string())?;
         let identity = identities
             .iter()
@@ -683,7 +683,7 @@ impl AppState {
         &self,
         identity: &AccountIdentity,
         has_multiple_identities: bool,
-        client: &innertube::YouTubeClient,
+        client: &innertubex::YouTubeClient,
     ) -> Result<serde_json::Value, String> {
         let refreshed =
             match self.it.account_menu_for_identity(client, &identity.data_sync_id).await {
@@ -828,7 +828,7 @@ impl AppState {
         }
 
         let client =
-            self.clients.get(innertube::METADATA_CLIENT).ok_or("metadata client missing")?;
+            self.clients.get(innertubex::METADATA_CLIENT).ok_or("metadata client missing")?;
         let outcome = match self.it.account_menu(client).await {
             Ok(info) if info.name.is_some() => Ok(info.visitor_data),
             Ok(_) => Err("That account's session has expired. Sign in with it again.".to_owned()),
@@ -935,7 +935,7 @@ impl AppState {
         if crate::db::account_key(&cookie).as_deref() != Some(active.as_str()) {
             return;
         }
-        let Some(client) = self.clients.get(innertube::METADATA_CLIENT) else { return };
+        let Some(client) = self.clients.get(innertubex::METADATA_CLIENT) else { return };
         match self.it.account_menu(client).await {
             Ok(info) if info.name.is_some() => {
                 let live = self.it.cookie().and_then(|c| crate::db::account_key(&c));
@@ -1102,7 +1102,7 @@ impl AppState {
         match self
             .it
             .next(
-                self.clients.get(innertube::METADATA_CLIENT).unwrap(),
+                self.clients.get(innertubex::METADATA_CLIENT).unwrap(),
                 Some(&video_id),
                 Some(&radio_id),
             )
@@ -1249,7 +1249,7 @@ impl AppState {
         {
             return Err("This has no radio behind it.".into());
         }
-        let client = self.clients.get(innertube::METADATA_CLIENT).ok_or("no metadata client")?;
+        let client = self.clients.get(innertubex::METADATA_CLIENT).ok_or("no metadata client")?;
         // Resolve the seed to (videoId?, radio playlist id). Album and artist need a page fetch:
         // an album's radio keys off its audio playlist, not its `MPRE…` browseId, and an artist
         // radio id is server-supplied.
@@ -1317,7 +1317,7 @@ impl AppState {
         playlist_id: &str,
     ) -> Result<(Vec<SongItem>, String), String> {
         const NO_RADIO: &str = "YouTube has no radio for this.";
-        let client = self.clients.get(innertube::METADATA_CLIENT).ok_or("no metadata client")?;
+        let client = self.clients.get(innertubex::METADATA_CLIENT).ok_or("no metadata client")?;
         let first =
             self.it.next(client, video_id, Some(playlist_id)).await.map_err(|e| e.to_string())?;
         if first.items.len() > 1 {
@@ -1383,7 +1383,7 @@ impl AppState {
         // ponytail: ~5k tracks at 100/page. A bound so a playlist that keeps handing out tokens
         // can't walk forever; raise it if a real playlist ever hits the cap.
         const MAX_PAGES: usize = 50;
-        let Some(client) = self.clients.get(innertube::METADATA_CLIENT) else { return };
+        let Some(client) = self.clients.get(innertubex::METADATA_CLIENT) else { return };
         let mut pages = 0;
         // The first page goes out at once so the panel visibly starts filling; after that the
         // walk emits at most once a second. Every page is a *full* payload (the rows changed),
@@ -1576,7 +1576,7 @@ impl AppState {
             q.current_client = q.lookahead_client.take();
             // New track is now playing → fresh history state (mirrors start_current).
             q.playback_ping = q.lookahead_playback_ping.take();
-            q.cpn = innertube::generate_cpn();
+            q.cpn = innertubex::generate_cpn();
             self.history_pinged.store(false, Ordering::Relaxed);
             q.duration = 0.0;
         }
@@ -1758,7 +1758,7 @@ impl AppState {
             q.current_client = Some(data.stream_client.clone());
             // Fresh play → fresh history state (context/01 §registerPlayback).
             q.playback_ping = data.playback_ping.clone();
-            q.cpn = innertube::generate_cpn();
+            q.cpn = innertubex::generate_cpn();
             self.history_pinged.store(false, Ordering::Relaxed);
             q.duration = 0.0;
             let cur = q.current;
@@ -1966,7 +1966,7 @@ impl AppState {
         let me = self.clone();
         let video_id = video_id.to_owned();
         tauri::async_runtime::spawn(async move {
-            let Some(client) = me.clients.get(innertube::METADATA_CLIENT) else { return };
+            let Some(client) = me.clients.get(innertubex::METADATA_CLIENT) else { return };
             let epoch = me.rate_epoch.load(Ordering::SeqCst);
             // No playlist id: the overlay is all this call is for, and the bare form is ~25x
             // smaller than the radio one (4 KB vs 100 KB gzipped).
@@ -2464,7 +2464,7 @@ impl AppState {
             let existing: HashSet<String> = q.items.iter().map(|i| i.video_id.clone()).collect();
             (last.video_id.clone(), seed, existing)
         };
-        let Some(client) = self.clients.get(innertube::METADATA_CLIENT) else { return 0 };
+        let Some(client) = self.clients.get(innertubex::METADATA_CLIENT) else { return 0 };
         // Snapshot → network → re-lock, same discipline as `prime_lookahead`; the generation
         // check between them is what makes it safe. A track added *during* the fetch could
         // theoretically duplicate — accepted (YTM's own radio repeats occasionally too).
@@ -3575,7 +3575,7 @@ const KEEP_PLAYED: usize = 200;
 
 /// Drop played rows beyond `keep` from the front, returning how many were removed so the caller can
 /// rebase every index that pointed into `items`.
-fn trim_played(items: &mut Vec<innertube::SongItem>, current: usize, keep: usize) -> usize {
+fn trim_played(items: &mut Vec<innertubex::SongItem>, current: usize, keep: usize) -> usize {
     let drop = current.saturating_sub(keep);
     if drop == 0 {
         return 0;
@@ -3941,7 +3941,7 @@ mod tests {
 
     #[test]
     fn queue_fingerprint_tracks_the_rows_not_their_metadata() {
-        let row = |id: &str| innertube::SongItem { video_id: id.into(), ..Default::default() };
+        let row = |id: &str| innertubex::SongItem { video_id: id.into(), ..Default::default() };
         let a = vec![row("a"), row("b"), row("c")];
         // Same rows in the same order: the UI already has them.
         assert_eq!(queue_fingerprint(&a), queue_fingerprint(&[row("a"), row("b"), row("c")]));
@@ -3972,7 +3972,7 @@ mod tests {
     // looks like it did nothing.
     #[test]
     fn queue_fingerprint_distinguishes_same_video_id_rows_by_queue_metadata() {
-        let row = |queued_from: Option<&str>| innertube::SongItem {
+        let row = |queued_from: Option<&str>| innertubex::SongItem {
             video_id: "x".into(),
             queued_from: queued_from.map(Into::into),
             ..Default::default()
@@ -3984,7 +3984,7 @@ mod tests {
         // Same story for `set_video_id`, the other field that tells apart two occurrences of the
         // same videoId (one came from a playlist page, so it carries a playlistSetVideoId; a
         // second copy queued manually doesn't).
-        let row2 = |set_video_id: Option<&str>| innertube::SongItem {
+        let row2 = |set_video_id: Option<&str>| innertubex::SongItem {
             video_id: "x".into(),
             set_video_id: set_video_id.map(Into::into),
             ..Default::default()
@@ -4001,7 +4001,7 @@ mod tests {
     #[test]
     fn persist_fingerprint_changes_when_shuffle_toggles_with_identical_items() {
         let mut q = QueueState {
-            items: vec![innertube::SongItem { video_id: "a".into(), ..Default::default() }],
+            items: vec![innertubex::SongItem { video_id: "a".into(), ..Default::default() }],
             ..QueueState::default()
         };
         let off = persist_fingerprint(&q);
@@ -4022,8 +4022,8 @@ mod tests {
 
     // `by.is_some()` (a named guest/host add) and a nameless solo add are both manual adds:
     // the `queued` marker is what forms the FIFO block, not the name.
-    fn song(id: &str, by: Option<&str>) -> innertube::SongItem {
-        innertube::SongItem {
+    fn song(id: &str, by: Option<&str>) -> innertubex::SongItem {
+        innertubex::SongItem {
             video_id: id.into(),
             title: id.into(),
             queued: by.is_some(),
@@ -4037,11 +4037,11 @@ mod tests {
     /// replayed out of On Repeat that were recorded back when the card parser leaked one).
     #[test]
     fn player_response_repairs_a_missing_or_bogus_artist() {
-        let with = |artists: &str, runs: Vec<&str>| innertube::SongItem {
+        let with = |artists: &str, runs: Vec<&str>| innertubex::SongItem {
             artists: artists.into(),
             artist_runs: runs
                 .into_iter()
-                .map(|t| innertube::models::metadata::ArtistRun {
+                .map(|t| innertubex::models::metadata::ArtistRun {
                     text: t.into(),
                     id: Some("UCstale".into()),
                 })
@@ -4087,7 +4087,7 @@ mod tests {
         backfill_metadata(&mut it, Some("191"), None, None);
         assert_eq!(it.duration.as_deref(), Some("3:11"));
         // A duration the row already carried wins: it's the length of the cut YouTube listed.
-        let mut it = innertube::SongItem { duration: Some("3:02".into()), ..song("v", None) };
+        let mut it = innertubex::SongItem { duration: Some("3:02".into()), ..song("v", None) };
         backfill_metadata(&mut it, Some("191"), None, None);
         assert_eq!(it.duration.as_deref(), Some("3:02"));
         // Junk from the player response can't blank an existing one.
@@ -4149,7 +4149,7 @@ mod tests {
 
     #[test]
     fn guest_adds_stack_fifo_after_current() {
-        let solo = |id: &str| innertube::SongItem { queued: true, ..song(id, None) };
+        let solo = |id: &str| innertubex::SongItem { queued: true, ..song(id, None) };
         // Host playlist [A*, B, C] (playing A): manual add goes right after current, not the end.
         let items = vec![song("a", None), song("b", None), song("c", None)];
         assert_eq!(guest_insert_index(&items, 0), 1);
@@ -4170,7 +4170,7 @@ mod tests {
     // replaced, and the manual adds the user made are not collateral damage (Metrolist drops them).
     #[test]
     fn radio_replaces_the_tail_but_keeps_history_and_manual_adds() {
-        let ids = |items: &[innertube::SongItem]| {
+        let ids = |items: &[innertubex::SongItem]| {
             items.iter().map(|i| i.video_id.clone()).collect::<Vec<_>>()
         };
         let mut q = QueueState {
@@ -4243,7 +4243,7 @@ mod tests {
     // handed to mpv for the gapless advance.
     #[test]
     fn appended_page_mixes_into_the_tail_but_leaves_the_primed_slot() {
-        let ids = |items: &[innertube::SongItem]| {
+        let ids = |items: &[innertubex::SongItem]| {
             items.iter().map(|i| i.video_id.clone()).collect::<Vec<_>>()
         };
         let page = || (0..100).map(|i| song(&format!("p{i}"), None)).collect::<Vec<_>>();
@@ -4298,7 +4298,7 @@ mod tests {
     // kept even under shuffle: the user queued that album, shuffle belongs to what's playing.
     #[test]
     fn appended_page_joins_the_add_to_queue_block_it_belongs_to() {
-        let added = |id: &str| innertube::SongItem { queued_end: true, ..song(id, None) };
+        let added = |id: &str| innertubex::SongItem { queued_end: true, ..song(id, None) };
         let items = vec![song("a", None), added("x1"), song("b", None)];
         let mut q = QueueState {
             shuffle_orig: Some(items.clone()),
@@ -4363,8 +4363,8 @@ mod tests {
     // was it landing at the very end, where a radio or a long playlist buries it forever.
     #[test]
     fn add_to_queue_goes_behind_the_manual_block_but_ahead_of_the_context() {
-        let queued = |id: &str| innertube::SongItem { queued: true, ..song(id, None) };
-        let added = |id: &str| innertube::SongItem { queued_end: true, ..song(id, None) };
+        let queued = |id: &str| innertubex::SongItem { queued: true, ..song(id, None) };
+        let added = |id: &str| innertubex::SongItem { queued_end: true, ..song(id, None) };
 
         // Plain playlist queue → straight behind the playing track.
         let q = QueueState {
@@ -4409,7 +4409,7 @@ mod tests {
     fn unshuffle_restores_order_and_current() {
         let orig = vec![song("a", None), song("b", None), song("c", None), song("d", None)];
         let heard = |ids: &[&str]| ids.iter().map(|s| (*s).to_owned()).collect::<HashSet<String>>();
-        let ids = |items: &[innertube::SongItem]| {
+        let ids = |items: &[innertubex::SongItem]| {
             items.iter().map(|i| i.video_id.clone()).collect::<Vec<_>>()
         };
         // Shuffle played "c" first → nothing upcoming has been heard, plain restore.
@@ -4435,8 +4435,8 @@ mod tests {
             song("a", None),
             song("b", None),
             song("c", None),
-            innertube::SongItem { queued: true, ..song("mine1", None) },
-            innertube::SongItem { queued: true, ..song("mine2", None) },
+            innertubex::SongItem { queued: true, ..song("mine1", None) },
+            innertubex::SongItem { queued: true, ..song("mine2", None) },
         ];
         let (items, idx) = unshuffled(with_adds, &heard(&["a"]), "a", 9);
         assert_eq!(ids(&items), ["a", "mine1", "mine2", "b", "c"]);
@@ -4473,7 +4473,7 @@ mod tests {
         want.sort();
         assert_eq!(got, want); // …and the rest is a permutation of everything else
                                // Degenerate cases: empty and single-item queues don't panic.
-        let mut empty: Vec<innertube::SongItem> = vec![];
+        let mut empty: Vec<innertubex::SongItem> = vec![];
         assert_eq!(shuffle_new_queue(&mut empty, 3), 0);
         let mut one = vec![song("only", None)];
         assert_eq!(shuffle_new_queue(&mut one, 5), 0);
@@ -4482,7 +4482,7 @@ mod tests {
 
     #[test]
     fn manual_adds_survive_context_switch() {
-        let solo = |id: &str| innertube::SongItem { queued: true, ..song(id, None) };
+        let solo = |id: &str| innertubex::SongItem { queued: true, ..song(id, None) };
         // Playing B (index 1); Q1/Q2 are unplayed manual adds, Q0 already played — only the
         // unplayed ones carry into a new queue.
         let items = vec![solo("q0"), song("b", None), solo("q1"), song("c", None), solo("q2")];
@@ -4495,7 +4495,7 @@ mod tests {
 
     #[test]
     fn shuffle_leaves_manual_queue_block_in_place() {
-        let solo = |id: &str| innertube::SongItem { queued: true, ..song(id, None) };
+        let solo = |id: &str| innertubex::SongItem { queued: true, ..song(id, None) };
         let mut items = vec![song("now", None), solo("q1"), solo("q2")];
         items.extend((0..8).map(|i| song(&format!("t{i}"), None)));
         shuffle_upcoming(&mut items, 0);
@@ -4511,8 +4511,8 @@ mod tests {
     // time keep the order they were queued in.
     #[test]
     fn shuffle_randomizes_a_play_next_album_but_not_loose_adds() {
-        let solo = |id: &str| innertube::SongItem { queued: true, ..song(id, None) };
-        let from = |id: &str, name: &str| innertube::SongItem {
+        let solo = |id: &str| innertubex::SongItem { queued: true, ..song(id, None) };
+        let from = |id: &str, name: &str| innertubex::SongItem {
             queued: true,
             queued_from: Some(name.into()),
             ..song(id, None)
@@ -4540,7 +4540,7 @@ mod tests {
 
     #[test]
     fn shuffle_keeps_autoplay_after_queue_tracks() {
-        let auto = |id: &str| innertube::SongItem { autoplay: true, ..song(id, None) };
+        let auto = |id: &str| innertubex::SongItem { autoplay: true, ..song(id, None) };
         // Playing index 0; upcoming = 4 playlist tracks + 4 autoplay tracks.
         let mut items = vec![song("now", None)];
         items.extend((0..4).map(|i| song(&format!("p{i}"), None)));

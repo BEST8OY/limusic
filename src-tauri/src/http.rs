@@ -10,7 +10,7 @@
 //! YouTube serves for `player.js` depends on it, so it should be visible at the fetch rather than
 //! inherited from somewhere else and quietly lost in a later edit.
 //!
-//! `crates/innertube` keeps its own client on purpose. It is the other side of the transport
+//! `crates/innertubex` keeps its own client on purpose. It is the other side of the transport
 //! boundary (context/11) and it configures a proxy per session, which is client-level state.
 
 use std::sync::OnceLock;

@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use innertube::SongItem;
+use innertubex::SongItem;
 use md5::{Digest, Md5};
 use tauri::Emitter;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
