@@ -13,10 +13,85 @@ use crate::blocklist::BlockList;
 use crate::clients::YouTubeClient;
 use crate::models::context::Locale;
 
-pub const BASE_URL: &str = "https://music.youtube.com/youtubei/v1/";
-pub const ORIGIN: &str = "https://music.youtube.com";
-pub const REFERER: &str = "https://music.youtube.com/";
-pub const SW_JS_DATA_URL: &str = "https://music.youtube.com/sw.js_data";
+pub const ORIGIN_WWW: &str = "https://www.youtube.com";
+pub const REFERER_WWW: &str = "https://www.youtube.com/";
+pub const API_BASE_WWW: &str = "https://www.youtube.com/youtubei/v1/";
+
+pub const ORIGIN_MUSIC: &str = "https://music.youtube.com";
+pub const REFERER_MUSIC: &str = "https://music.youtube.com/";
+pub const API_BASE_MUSIC: &str = "https://music.youtube.com/youtubei/v1/";
+
+pub const ORIGIN_MWEB: &str = "https://m.youtube.com";
+pub const REFERER_MWEB: &str = "https://m.youtube.com/";
+pub const API_BASE_MWEB: &str = "https://m.youtube.com/youtubei/v1/";
+
+pub const ORIGIN_STUDIO: &str = "https://studio.youtube.com";
+pub const REFERER_STUDIO: &str = "https://studio.youtube.com/";
+pub const API_BASE_STUDIO: &str = "https://studio.youtube.com/youtubei/v1/";
+
+// Kept for backward compatibility
+pub const BASE_URL: &str = API_BASE_MUSIC;
+pub const ORIGIN: &str = ORIGIN_MUSIC;
+pub const REFERER: &str = REFERER_MUSIC;
+pub const SW_JS_DATA_URL: &str = "https://www.youtube.com/sw.js_data";
+
+#[derive(Debug, Clone, Copy)]
+pub struct EndpointRoute {
+    pub api_base: &'static str,
+    pub origin: &'static str,
+    pub referer: &'static str,
+}
+
+/// Resolve endpoint URL and origins dynamically matching MetrolistGroup/innertubex.
+pub fn resolve_route(endpoint: &str, client: &YouTubeClient) -> EndpointRoute {
+    let clean = endpoint.split('?').next().unwrap_or(endpoint).trim_start_matches('/');
+    if clean == "player" && client.use_music_player_endpoint {
+        EndpointRoute {
+            api_base: API_BASE_MUSIC,
+            origin: ORIGIN_MUSIC,
+            referer: REFERER_MUSIC,
+        }
+    } else if client.client_name == "WEB_REMIX" {
+        EndpointRoute {
+            api_base: API_BASE_MUSIC,
+            origin: ORIGIN_MUSIC,
+            referer: REFERER_MUSIC,
+        }
+    } else if client.client_name == "WEB_CREATOR" {
+        EndpointRoute {
+            api_base: API_BASE_STUDIO,
+            origin: ORIGIN_STUDIO,
+            referer: REFERER_STUDIO,
+        }
+    } else if client.client_name == "MWEB" {
+        EndpointRoute {
+            api_base: API_BASE_MWEB,
+            origin: ORIGIN_MWEB,
+            referer: REFERER_MWEB,
+        }
+    } else {
+        EndpointRoute {
+            api_base: API_BASE_WWW,
+            origin: ORIGIN_WWW,
+            referer: REFERER_WWW,
+        }
+    }
+}
+
+/// Inject PREF cookie with user's locale settings matching innertubex.
+pub fn inject_pref_cookie(cookie: Option<&str>, hl: &str, gl: &str) -> String {
+    let pref = format!("f1=50000000&hl={hl}&gl={gl}");
+    match cookie {
+        Some(c) if !c.is_empty() => {
+            if c.contains("PREF=") {
+                c.to_owned()
+            } else {
+                format!("{c}; PREF={pref}")
+            }
+        }
+        _ => format!("PREF={pref}"),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -44,6 +119,7 @@ pub struct Session {
     pub locale: Locale,
     pub visitor_data: Option<String>,
     pub data_sync_id: Option<String>,
+    pub auth_user: Option<String>,
     /// Full cookie string (Phase 3). Present ⇒ authenticated requests possible.
     pub cookie: Option<String>,
 }
@@ -110,7 +186,7 @@ pub(crate) fn merge_set_cookie(cookie: &str, set_cookie: &[&str]) -> Option<Stri
 /// never held across an `.await`, so a std `RwLock` is right (no async lock needed).
 #[derive(Clone)]
 pub struct InnerTube {
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     session: Arc<RwLock<Session>>,
     /// "Hide music videos" (off by default): drop non-ATV rows from the surfaces YouTube
     /// generates. Shared like `session` so a settings toggle reaches every clone, and an atomic
@@ -149,6 +225,16 @@ impl InnerTube {
             session_rejected: Arc::new(Notify::new()),
             cookie_changed: Arc::new(Notify::new()),
         })
+    }
+
+    /// Access the underlying reqwest client.
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// Get current session auth user ID if present.
+    pub fn auth_user(&self) -> Option<String> {
+        self.session.read().ok().and_then(|s| s.auth_user.clone())
     }
 
     /// Signal raised when YouTube rejects the signed-in session. See the field.
@@ -285,10 +371,11 @@ impl InnerTube {
         body: &B,
         set_login: bool,
     ) -> Result<serde_json::Value, Error> {
+        let route = resolve_route(path, client);
         // `path` may already carry query params (e.g. browse continuations); chain accordingly.
         let sep = if path.contains('?') { '&' } else { '?' };
-        let url = format!("{BASE_URL}{path}{sep}prettyPrint=false");
-        let headers = self.headers(client, set_login);
+        let url = format!("{}{path}{sep}prettyPrint=false", route.api_base);
+        let headers = self.headers(client, path, set_login);
         let body = serde_json::to_vec(body)?;
 
         let mut delay = Duration::from_millis(500);
@@ -330,11 +417,6 @@ impl InnerTube {
 
     /// POST raw bytes to a path on the same origin that is *not* under `/youtubei`, with this
     /// client's headers plus `extra`, and hand back the response headers along with the body.
-    ///
-    /// Google's resumable uploader ("Scotty") lives on its own path and answers the first step in
-    /// a header, so neither `post`'s URL shape nor its JSON-only return works here. The
-    /// `content-type: application/json` the client headers carry stays put even when the body is
-    /// an image: the uploader ignores it, and that is the shape known to work.
     pub(crate) async fn post_upload(
         &self,
         path: &str,
@@ -342,21 +424,19 @@ impl InnerTube {
         extra: &[(&'static str, String)],
         body: Vec<u8>,
     ) -> Result<(HeaderMap, Vec<u8>), Error> {
-        let mut headers = self.headers(client, true);
+        let mut headers = self.headers(client, path, true);
         for (name, value) in extra {
             if let Ok(v) = HeaderValue::from_str(value) {
                 headers.insert(HeaderName::from_static(name), v);
             }
         }
-        // Explicitly, from the body we are about to send: reqwest omits `content-length` entirely
-        // when the body is empty, and the uploader answers the empty "start" call with a bare
-        // 411 Length Required. Sending it ourselves costs nothing on the calls that carry bytes.
         if let Ok(v) = HeaderValue::from_str(&body.len().to_string()) {
             headers.insert(reqwest::header::CONTENT_LENGTH, v);
         }
+        let route = resolve_route(path, client);
         let resp = self
             .http
-            .post(format!("{ORIGIN}/{path}"))
+            .post(format!("{}/{}", route.origin, path.trim_start_matches('/')))
             .headers(headers)
             .body(body)
             .send()
@@ -367,9 +447,15 @@ impl InnerTube {
         Ok((headers, resp.bytes().await?.to_vec()))
     }
 
-    /// Per-request headers. context/01 §ytClient. Note `X-YouTube-Client-Name` carries the
-    /// numeric client **id**, not the name string — intentional and required.
-    fn headers(&self, client: &YouTubeClient, set_login: bool) -> HeaderMap {
+    /// Per-request headers. Matches MetrolistGroup/innertubex ytClient headers.
+    pub fn headers(&self, client: &YouTubeClient, path: &str, set_login: bool) -> HeaderMap {
+        let route = resolve_route(path, client);
+        let request_referer = if client.is_embedded {
+            "https://www.reddit.com/"
+        } else {
+            route.referer
+        };
+
         let mut h = HeaderMap::new();
         let set = |h: &mut HeaderMap, k: &'static str, v: &str| {
             if let Ok(val) = HeaderValue::from_str(v) {
@@ -378,15 +464,18 @@ impl InnerTube {
         };
         set(&mut h, "content-type", "application/json");
         set(&mut h, "accept", "application/json");
-        set(&mut h, "accept-language", "en-US,en;q=0.9");
+
+        let s = self.session.read().unwrap();
+        let accept_lang = s.locale.accept_language_header();
+        set(&mut h, "accept-language", &accept_lang);
         set(&mut h, "x-goog-api-format-version", "1");
         set(&mut h, "x-youtube-client-name", &client.client_id);
         set(&mut h, "x-youtube-client-version", &client.client_version);
-        set(&mut h, "x-origin", ORIGIN);
-        set(&mut h, "referer", REFERER);
+        set(&mut h, "origin", route.origin);
+        set(&mut h, "x-origin", route.origin);
+        set(&mut h, "referer", request_referer);
         set(&mut h, "user-agent", &client.user_agent);
 
-        let s = self.session.read().unwrap();
         if let Some(vd) = &s.visitor_data {
             set(&mut h, "x-goog-visitor-id", vd);
         }
@@ -394,9 +483,14 @@ impl InnerTube {
         // SAPISIDHASH cookie auth — only when logged in AND the client supports it (Phase 3).
         if set_login && client.login_supported {
             if let Some(cookie) = &s.cookie {
-                set(&mut h, "cookie", cookie);
+                let effective_cookie = inject_pref_cookie(Some(cookie), &s.locale.hl, &s.locale.gl);
+                set(&mut h, "cookie", &effective_cookie);
+
+                let auth_user = s.auth_user.as_deref().unwrap_or("0");
+                set(&mut h, "x-goog-authuser", auth_user);
+
                 if let Some(sapisid) = s.sapisid() {
-                    if let Ok(val) = HeaderValue::from_str(&sapisid_hash(&sapisid, ORIGIN)) {
+                    if let Ok(val) = HeaderValue::from_str(&sapisid_hash(&sapisid, route.origin)) {
                         h.insert(HeaderName::from_static("authorization"), val);
                     }
                 }
@@ -405,10 +499,51 @@ impl InnerTube {
         h
     }
 
-    /// Bootstrap `visitorData` anonymously by scraping `sw.js_data`. context/04 §A.
+    /// Fetch visitor data using sw.js_data or homepage fallback.
     pub async fn fetch_visitor_data(&self) -> Result<String, Error> {
-        let text = self.http.get(SW_JS_DATA_URL).send().await?.error_for_status()?.text().await?;
-        parse_visitor_data(&text)
+        self.fetch_fresh_visitor_data().await
+    }
+
+    /// Fetch fresh visitor data matching MetrolistGroup/innertubex fetchFreshVisitorData.
+    pub async fn fetch_fresh_visitor_data(&self) -> Result<String, Error> {
+        // 1. Try sw.js_data from www.youtube.com
+        if let Ok(resp) = self
+            .http
+            .get(SW_JS_DATA_URL)
+            .header("user-agent", crate::clients::YouTubeClient::USER_AGENT_WEB)
+            .header("accept", "application/json,text/plain,*/*")
+            .send()
+            .await
+        {
+            if let Ok(text) = resp.text().await {
+                if let Ok(vd) = parse_visitor_data(&text) {
+                    self.set_visitor_data(Some(vd.clone()));
+                    return Ok(vd);
+                }
+            }
+        }
+
+        // 2. Try homepage fallback from music.youtube.com
+        if let Ok(resp) = self
+            .http
+            .get(ORIGIN_MUSIC)
+            .header("user-agent", crate::clients::YouTubeClient::USER_AGENT_WEB)
+            .header(
+                "accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .send()
+            .await
+        {
+            if let Ok(text) = resp.text().await {
+                if let Some(vd) = parse_homepage_visitor_data(&text) {
+                    self.set_visitor_data(Some(vd.clone()));
+                    return Ok(vd);
+                }
+            }
+        }
+
+        Err(Error::VisitorDataNotFound)
     }
 
     /// Register a play in watch history: GET the response's
@@ -423,15 +558,27 @@ impl InnerTube {
         playlist_id: Option<&str>,
     ) -> Result<(), Error> {
         let url = build_playback_url(base_url, &client.client_name, cpn, playlist_id);
-        let headers = self.headers(client, true);
+        let headers = self.headers(client, "playback", true);
         let resp = self.http.get(&url).headers(headers).send().await?.error_for_status()?;
         self.absorb_cookies(resp.headers());
         Ok(())
     }
 
-    #[cfg(any(test, feature = "integration-tests"))]
-    pub fn http(&self) -> &reqwest::Client {
-        &self.http
+    /// Register watchtime telemetry with YouTube stats service.
+    pub async fn register_watchtime(
+        &self,
+        client: &YouTubeClient,
+        base_url: &str,
+        cpn: &str,
+        playlist_id: Option<&str>,
+        state: &str,
+    ) -> Result<(), Error> {
+        let mut url = build_playback_url(base_url, &client.client_name, cpn, playlist_id);
+        url.push_str(&format!("&state={}", urlencoding::encode(state)));
+        let headers = self.headers(client, "watchtime", true);
+        let resp = self.http.get(&url).headers(headers).send().await?.error_for_status()?;
+        self.absorb_cookies(resp.headers());
+        Ok(())
     }
 }
 
@@ -499,22 +646,145 @@ fn sha1_hex(input: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// The `sw.js_data` body starts with a 4–5 char junk prefix (`)]}'`); strip it, parse JSON,
-/// and find the element matching `^Cg[ts]` in `[0][2]`. context/04 §A.
-fn parse_visitor_data(body: &str) -> Result<String, Error> {
+/// Parse visitorData from sw.js_data payload (supporting modern array path [0][2][0][0][13] and legacy shapes).
+pub fn parse_visitor_data(body: &str) -> Result<String, Error> {
     // Drop everything up to and including the first newline or the `)]}'` guard.
     let json_start = body.find('[').ok_or(Error::VisitorDataNotFound)?;
     let value: serde_json::Value = serde_json::from_str(&body[json_start..])?;
-    let arr = value
+
+    // Check nested array path [0][2][0][0][13] (modern YouTube sw.js_data)
+    if let Some(vd) = value
         .get(0)
         .and_then(|v| v.get(2))
-        .and_then(|v| v.as_array())
-        .ok_or(Error::VisitorDataNotFound)?;
-    arr.iter()
-        .filter_map(|v| v.as_str())
-        .find(|s| s.starts_with("Cgt") || s.starts_with("Cgs"))
-        .map(str::to_owned)
-        .ok_or(Error::VisitorDataNotFound)
+        .and_then(|v| v.get(0))
+        .and_then(|v| v.get(0))
+        .and_then(|v| v.get(13))
+        .and_then(|v| v.as_str())
+    {
+        if !vd.is_empty() {
+            return Ok(vd.to_owned());
+        }
+    }
+
+    // Check array path [0][2] filter by Cgt/Cgs (innertube legacy)
+    if let Some(arr) = value.get(0).and_then(|v| v.get(2)).and_then(|v| v.as_array()) {
+        if let Some(s) = arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("Cgt") || s.starts_with("Cgs"))
+        {
+            return Ok(s.to_owned());
+        }
+    }
+
+    Err(Error::VisitorDataNotFound)
+}
+
+/// Parse visitorData from YouTube Music homepage HTML via regex.
+pub fn parse_homepage_visitor_data(html: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"(?:VISITOR_DATA|visitorData)"\s*:\s*"([^"]+)""#).ok()?;
+    re.captures(html).and_then(|c| c.get(1)).map(|m| m.as_str().to_owned())
+}
+
+/// Validate media URL host and scheme matching MetrolistGroup/innertubex.
+pub fn validated_media_url(url_str: &str) -> Result<String, Error> {
+    let parsed = reqwest::Url::parse(url_str).map_err(|e| Error::Other(e.to_string()))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(Error::Other("invalid media url scheme".into()));
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    if !host.ends_with(".googlevideo.com")
+        && !host.ends_with(".youtube.com")
+        && host != "googlevideo.com"
+        && host != "youtube.com"
+    {
+        return Err(Error::Other(format!("untrusted media host: {host}")));
+    }
+    Ok(url_str.to_owned())
+}
+
+/// Validate stats URL host and path matching MetrolistGroup/innertubex.
+pub fn validated_stats_url(url_str: &str) -> Result<String, Error> {
+    let parsed = reqwest::Url::parse(url_str).map_err(|e| Error::Other(e.to_string()))?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err(Error::Other("invalid stats url scheme".into()));
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    let valid_hosts = ["s.youtube.com", "www.youtube.com", "music.youtube.com"];
+    if !valid_hosts.contains(&host) {
+        return Err(Error::Other(format!("untrusted stats host: {host}")));
+    }
+    let path = parsed.path();
+    if path != "/api/stats/playback" && path != "/api/stats/watchtime" {
+        return Err(Error::Other(format!("untrusted stats path: {path}")));
+    }
+    Ok(url_str.to_owned())
+}
+
+/// Validate upload URL host and scheme matching MetrolistGroup/innertubex.
+pub fn validated_upload_url(url_str: &str) -> Result<String, Error> {
+    let parsed = reqwest::Url::parse(url_str).map_err(|e| Error::Other(e.to_string()))?;
+    if parsed.scheme() != "https" {
+        return Err(Error::Other("invalid upload url scheme".into()));
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    if !host.ends_with(".youtube.com") && !host.ends_with(".googlevideo.com") {
+        return Err(Error::Other(format!("untrusted upload host: {host}")));
+    }
+    Ok(url_str.to_owned())
+}
+
+fn add_query_before_fragment(url: &str, param: &str) -> String {
+    let (before, fragment) = match url.find('#') {
+        Some(idx) => (&url[..idx], &url[idx..]),
+        None => (url, ""),
+    };
+    let sep = if before.contains('?') { "&" } else { "?" };
+    format!("{before}{sep}{param}{fragment}")
+}
+
+/// Append client playback nonce (cpn) to media URL matching MetrolistGroup/innertubex.
+pub fn append_client_playback_nonce(url: &str, cpn: &str) -> String {
+    if cpn.len() != 16 || !cpn.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return url.to_owned();
+    }
+    if url.contains("cpn=") {
+        return url.to_owned();
+    }
+    add_query_before_fragment(url, &format!("cpn={cpn}"))
+}
+
+/// Replace client playback nonce (cpn) in media URL matching MetrolistGroup/innertubex.
+pub fn replace_client_playback_nonce(url: &str, cpn: &str) -> String {
+    if cpn.len() != 16 || !cpn.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return url.to_owned();
+    }
+    if let Ok(re) = regex::Regex::new(r"([?&])cpn=[^&#]*") {
+        if re.is_match(url) {
+            return re.replace(url, format!("${{1}}cpn={cpn}")).to_string();
+        }
+    }
+    append_client_playback_nonce(url, cpn)
+}
+
+/// Validate caption URL endpoint matching MetrolistGroup/innertubex.
+pub fn validated_caption_url(url_str: &str) -> Result<String, Error> {
+    let parsed = reqwest::Url::parse(url_str).map_err(|e| Error::Other(e.to_string()))?;
+    if parsed.scheme() != "https" {
+        return Err(Error::Other("caption url must use https".into()));
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    let valid_endpoint = match host {
+        "youtube.com" | "www.youtube.com" | "music.youtube.com" | "m.youtube.com" => {
+            parsed.path() == "/api/timedtext"
+        }
+        "video.google.com" => parsed.path() == "/timedtext",
+        _ => false,
+    };
+    if !valid_endpoint {
+        return Err(Error::Other(format!("untrusted caption host or path: {host}{}", parsed.path())));
+    }
+    Ok(url_str.to_owned())
 }
 
 #[cfg(test)]
