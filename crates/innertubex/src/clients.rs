@@ -39,6 +39,9 @@ pub struct YouTubeClient {
     pub friendly_name: Option<String>,
 
     #[serde(default)]
+    pub platform: Option<String>,
+
+    #[serde(default)]
     pub login_supported: bool,
     #[serde(default)]
     pub login_required: bool,
@@ -49,6 +52,30 @@ pub struct YouTubeClient {
     /// Web client: needs PoToken + n-transform (deferred to Phase 2).
     #[serde(default)]
     pub use_web_po_tokens: bool,
+    #[serde(default)]
+    pub require_po_token: bool,
+    #[serde(default)]
+    pub po_token_binding: Option<PoTokenBinding>,
+    #[serde(default)]
+    pub include_user_agent_in_context: bool,
+    #[serde(default)]
+    pub use_sabr: bool,
+    #[serde(default)]
+    pub use_music_player_endpoint: bool,
+    #[serde(default)]
+    pub skip_player_response_validation: bool,
+}
+
+impl YouTubeClient {
+    pub const USER_AGENT_WEB: &'static str =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PoTokenBinding {
+    VideoId,
+    VisitorData,
 }
 
 const BUNDLED: &str = include_str!("../clients.json");
