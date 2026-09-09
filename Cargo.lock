@@ -2866,10 +2866,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "innertube"
+name = "innertubex"
 version = "0.7.0"
 dependencies = [
+ "base64 0.22.1",
  "hex",
+ "regex",
  "reqwest 0.12.28",
  "rustypipe",
  "serde",
@@ -3244,7 +3246,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "innertube",
+ "innertubex",
  "ksni",
  "libc",
  "listen-protocol",

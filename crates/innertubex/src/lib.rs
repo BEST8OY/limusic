@@ -9,11 +9,12 @@ pub mod clients;
 pub mod endpoints;
 pub mod models;
 pub mod rustypipe_fallback;
+pub mod strategy;
 pub mod transport;
 
 pub use blocklist::BlockList;
 pub use clients::{
-    Clients, YouTubeClient, LYRICS_TIMED_CLIENT, MAIN_CLIENT, METADATA_CLIENT,
+    Clients, PoTokenBinding, YouTubeClient, LYRICS_TIMED_CLIENT, MAIN_CLIENT, METADATA_CLIENT,
     STREAM_FALLBACK_ORDER, UPLOAD_FALLBACK_ORDER,
 };
 pub use models::browse::{
@@ -26,8 +27,20 @@ pub use models::metadata::{
     AccountIdentity, AccountInfo, NextResult, Rating, SearchResult, SongItem,
 };
 pub use models::player::{
-    find_format, find_video_format, AudioQuality, Format, PlaybackTracking, PlayerResponse,
+    audio_format_score, find_format, find_video_format, select_best_audio_format,
+    select_best_video_format, AudioQuality, Format, PlaybackTracking, PlayerResponse,
     StreamingData,
 };
 pub use rustypipe_fallback::{FallbackError, StreamCandidate};
-pub use transport::{cookie_sapisid, generate_cpn, Error, InnerTube, Session};
+pub use strategy::{
+    AuthenticationPolicy, CapabilitySupport, ClientContentCapabilities, ClientLifecycle,
+    ClientSelectionMode, ContentAwareFallbackStrategy, ContentHints, PlaybackClientManifest,
+    PlaybackTransport, SelectedClient, MANIFESTS,
+};
+pub use transport::{
+    cookie_sapisid, generate_cpn, inject_pref_cookie, parse_homepage_visitor_data,
+    parse_visitor_data, resolve_route, sapisid_hash, validated_media_url, validated_stats_url,
+    validated_upload_url, EndpointRoute, Error, InnerTube, Session, API_BASE_MUSIC,
+    API_BASE_STUDIO, API_BASE_WWW, BASE_URL, ORIGIN, ORIGIN_MUSIC, ORIGIN_STUDIO, ORIGIN_WWW,
+    REFERER, SW_JS_DATA_URL,
+};

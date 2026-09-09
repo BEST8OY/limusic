@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/innertube",
+    "crates/innertubex",
     "crates/player",
     "crates/listen-protocol",
     "crates/sync-server",

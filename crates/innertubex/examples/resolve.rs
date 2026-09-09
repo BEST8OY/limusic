@@ -2,7 +2,7 @@
 //!   cargo run -p innertube --example resolve -- <videoId> [--rustypipe]
 //! Prints the URL on stdout (pipe into `cargo run -p player --example play`).
 
-use innertube::{find_format, AudioQuality, Clients, InnerTube, Session, STREAM_FALLBACK_ORDER};
+use innertubex::{find_format, AudioQuality, Clients, InnerTube, Session, STREAM_FALLBACK_ORDER};
 
 #[tokio::main]
 async fn main() {
@@ -30,7 +30,7 @@ async fn main() {
         }
         eprintln!("direct clients failed → rustypipe");
     }
-    let c = innertube::rustypipe_fallback::resolve(&video_id, true).await.expect("rustypipe");
+    let c = innertubex::rustypipe_fallback::resolve(&video_id, true).await.expect("rustypipe");
     eprintln!("resolved via rustypipe (itag {})", c.itag);
     println!("{}", c.url);
 }

@@ -2,7 +2,7 @@
 //!   cargo test -p innertube --features integration-tests -- --nocapture
 #![cfg(feature = "integration-tests")]
 
-use innertube::{
+use innertubex::{
     find_format, AudioQuality, Clients, InnerTube, PlaylistSort, Session, STREAM_FALLBACK_ORDER,
 };
 
@@ -170,7 +170,7 @@ async fn playlist_sort_params_still_order_the_server_side_list() {
     assert!(!menu.editable, "Liked Music sorts through browse params, not a playlist edit");
     assert!(plain.items.len() > 1, "need more than one track to tell an order from another");
 
-    let titles = |p: &innertube::PlaylistPage| -> Vec<String> {
+    let titles = |p: &innertubex::PlaylistPage| -> Vec<String> {
         p.items.iter().map(|i| i.title.clone()).collect()
     };
     let asc = it.playlist(client, "VLLM", Some((PlaylistSort::Title, false))).await.expect("A-Z");
@@ -214,7 +214,7 @@ async fn every_surface_yields_a_scrobbleable_artist() {
     let vd = it.fetch_visitor_data().await.ok();
     let it = InnerTube::new(Session { visitor_data: vd, ..Session::default() }, None).unwrap();
     let clients = Clients::bundled();
-    let c = clients.get(innertube::METADATA_CLIENT).expect("metadata client");
+    let c = clients.get(innertubex::METADATA_CLIENT).expect("metadata client");
 
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
@@ -285,7 +285,7 @@ async fn every_surface_yields_a_scrobbleable_artist() {
 #[tokio::test]
 async fn rustypipe_url_is_fetchable() {
     let c =
-        innertube::rustypipe_fallback::resolve(VIDEO_ID, true).await.expect("rustypipe resolve");
+        innertubex::rustypipe_fallback::resolve(VIDEO_ID, true).await.expect("rustypipe resolve");
     let bare = probe(&c.url, None).await;
     eprintln!("rustypipe itag {}: no-UA -> HTTP {bare}", c.itag);
     // mpv sends its own libmpv UA by default; also probe with a browser-ish UA for comparison.
@@ -308,7 +308,7 @@ async fn radio_seeds_resolve() {
     let it = InnerTube::new(Session::default(), None).unwrap();
     let vd = it.fetch_visitor_data().await.ok();
     let it = InnerTube::new(Session { visitor_data: vd, ..Session::default() }, None).unwrap();
-    let client = Clients::bundled().get(innertube::METADATA_CLIENT).unwrap().clone();
+    let client = Clients::bundled().get(innertubex::METADATA_CLIENT).unwrap().clone();
 
     // 1. Song radio.
     let song = it
