@@ -33,9 +33,10 @@ pub use models::player::{
 };
 pub use rustypipe_fallback::{FallbackError, StreamCandidate};
 pub use strategy::{
-    AuthenticationPolicy, CapabilitySupport, ClientContentCapabilities, ClientLifecycle,
+    AuthenticationPolicy, CapabilitySupport, ClientContentCapabilities, ClientFailureKind,
+    ClientHealthContent, ClientHealthMonitor, ClientHealthScope, ClientLifecycle,
     ClientSelectionMode, ContentAwareFallbackStrategy, ContentHints, PlaybackClientManifest,
-    PlaybackTransport, SelectedClient, MANIFESTS,
+    PlaybackTransport, SelectedClient, SimpleHealthTracker, MANIFESTS,
 };
 pub use transport::{
     cookie_sapisid, generate_cpn, inject_pref_cookie, parse_homepage_visitor_data,

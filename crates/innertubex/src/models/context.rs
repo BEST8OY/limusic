@@ -19,8 +19,22 @@ impl Default for Locale {
 
 impl Locale {
     /// Format the Accept-Language header string matching MetrolistGroup/innertubex.
+    ///
+    /// Avoids duplicating regional qualifiers when `hl` already carries one (e.g. `pt-BR`, `zh-CN`),
+    /// and formats valid RFC language tags even when `gl` is empty.
     pub fn accept_language_header(&self) -> String {
-        format!("{}-{},{};q=0.9,en-US;q=0.8,en;q=0.7", self.hl, self.gl, self.hl)
+        let language_tag = self.hl.replace('_', "-");
+        let regional_tag = if language_tag.contains('-') || self.gl.is_empty() {
+            language_tag.clone()
+        } else {
+            format!("{language_tag}-{}", self.gl)
+        };
+        let fallback = language_tag.split('-').next().unwrap_or(&language_tag);
+        if regional_tag == fallback {
+            regional_tag
+        } else {
+            format!("{regional_tag},{fallback};q=0.9")
+        }
     }
 }
 
@@ -135,3 +149,30 @@ impl YouTubeClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_accept_language_header_simple() {
+        let loc = Locale { gl: "US".into(), hl: "en".into() };
+        assert_eq!(loc.accept_language_header(), "en-US,en;q=0.9");
+    }
+
+    #[test]
+    fn test_accept_language_header_compound_hl() {
+        let loc = Locale { gl: "BR".into(), hl: "pt-BR".into() };
+        assert_eq!(loc.accept_language_header(), "pt-BR,pt;q=0.9");
+
+        let loc_underscore = Locale { gl: "CN".into(), hl: "zh_CN".into() };
+        assert_eq!(loc_underscore.accept_language_header(), "zh-CN,zh;q=0.9");
+    }
+
+    #[test]
+    fn test_accept_language_header_empty_gl() {
+        let loc = Locale { gl: "".into(), hl: "en".into() };
+        assert_eq!(loc.accept_language_header(), "en");
+    }
+}
+

@@ -28,6 +28,9 @@ export function parseYtLink(input: string): LinkTarget | null {
 	// youtu.be/<videoId>
 	if (u.hostname.endsWith('youtu.be')) return seg ? { kind: 'song', id: seg } : null;
 
+	// Shorts: youtube.com/shorts/<videoId>
+	if (seg === 'shorts' && rest) return { kind: 'song', id: rest };
+
 	// A watch link with both a video and a list is a track being played out of a playlist; the
 	// track is what was shared.
 	const v = u.searchParams.get('v');

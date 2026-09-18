@@ -13,9 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use innertubex::{
-    find_format, find_video_format, rustypipe_fallback, validated_media_url, AudioQuality, Clients,
-    ContentAwareFallbackStrategy, Format, InnerTube, PlayerResponse, MAIN_CLIENT,
-    STREAM_FALLBACK_ORDER, UPLOAD_FALLBACK_ORDER,
+    find_format, find_video_format, rustypipe_fallback, validated_media_url, AudioQuality,
+    ClientFailureKind, ClientHealthMonitor, ClientHealthScope, Clients,
+    ContentAwareFallbackStrategy, Format, InnerTube, PlayerResponse, SimpleHealthTracker,
+    MAIN_CLIENT, STREAM_FALLBACK_ORDER, UPLOAD_FALLBACK_ORDER,
 };
 use tokio::sync::Mutex;
 
@@ -94,6 +95,7 @@ pub struct Orchestrator {
     clients: Clients,
     cipher: Arc<CipherDeobfuscator>,
     potoken: Arc<PoTokenGenerator>,
+    health_tracker: Arc<SimpleHealthTracker>,
     /// videoId → when its WEB_REMIX stream last 403'd on the real GET, so the next resolve skips
     /// WEB_REMIX for it (context/06 §2). Cleared when the cipher self-heals. `Arc` so the
     /// off-hot-path self-heal task can clear it. Entries expire: the bar only has to survive the
@@ -127,6 +129,7 @@ impl Orchestrator {
             clients,
             cipher,
             potoken,
+            health_tracker: Arc::new(SimpleHealthTracker::default()),
             web_remix_failed: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -134,6 +137,7 @@ impl Orchestrator {
     /// Record that a WEB_REMIX stream for `video_id` failed on the real GET (called by the player
     /// layer on a playback 403). The next resolve for this id bypasses WEB_REMIX. context/06 §2.
     pub async fn mark_web_remix_failed(&self, video_id: &str) {
+        self.health_tracker.record_failure("WEB_REMIX", ClientFailureKind::MediaForbidden, None);
         blacklist_insert(&mut *self.web_remix_failed.lock().await, video_id, Instant::now());
     }
 
@@ -219,9 +223,18 @@ impl Orchestrator {
             ..Default::default()
         };
         let strategy = ContentAwareFallbackStrategy::default();
-        let dynamic_clients = strategy.select_clients(&self.clients, &hints, logged_in, disabled);
+        let dynamic_clients = strategy.select_clients_with_health(
+            &self.clients,
+            &hints,
+            logged_in,
+            disabled,
+            Some(&*self.health_tracker),
+        );
         let fallback_keys: Vec<&str> = if is_upload {
-            UPLOAD_FALLBACK_ORDER.to_vec()
+            let mut keys = UPLOAD_FALLBACK_ORDER.to_vec();
+            keys.sort_by_key(|k| self.health_tracker.score_adjustment(k, None));
+            keys.reverse();
+            keys
         } else {
             let mut keys: Vec<&str> = dynamic_clients
                 .iter()
@@ -233,6 +246,8 @@ impl Orchestrator {
                     keys.push(fb);
                 }
             }
+            keys.sort_by_key(|k| self.health_tracker.score_adjustment(k, None));
+            keys.reverse();
             keys
         };
         let order: &[&str] = &fallback_keys;
@@ -276,10 +291,14 @@ impl Orchestrator {
                     Ok(r) if r.playability_status.is_ok() => (key.to_owned(), r),
                     Ok(r) => {
                         tracing::debug!(client = key, status = %r.playability_status.status, "not OK");
+                        let scope = ClientHealthScope::from_hints(&hints, logged_in);
+                        self.health_tracker.record_failure(&key, ClientFailureKind::Playability, Some(&scope));
                         continue;
                     }
                     Err(e) => {
                         tracing::warn!(client = key, error = %e, "player call failed");
+                        let scope = ClientHealthScope::from_hints(&hints, logged_in);
+                        self.health_tracker.record_failure(&key, ClientFailureKind::PlayerRequest, Some(&scope));
                         continue;
                     }
                 }
@@ -298,6 +317,8 @@ impl Orchestrator {
             // "sign-in needed" for what is really a broken extraction runtime. Issues #71/#128.
             let Some(mut url) = self.find_url(format, video_id).await else {
                 tracing::warn!(video_id, client = %key, itag = format.itag, "no stream URL (deciphering unavailable?)");
+                let scope = ClientHealthScope::from_hints(&hints, logged_in);
+                self.health_tracker.record_failure(&key, ClientFailureKind::Token, Some(&scope));
                 continue;
             };
 
@@ -358,6 +379,8 @@ impl Orchestrator {
             let headers =
                 stream_headers(client.map(|c| c.user_agent.clone()), self.it.cookie(), is_upload);
             if self.validate_head(&url, &headers).await {
+                let scope = ClientHealthScope::from_hints(&hints, logged_in);
+                self.health_tracker.record_success(&key, Some(&scope));
                 let ping = main_ping.clone().or_else(|| playback_ping(&resp, &key));
                 return Ok(self.build(
                     video_id,
@@ -371,6 +394,9 @@ impl Orchestrator {
                     headers,
                 ));
             }
+
+            let scope = ClientHealthScope::from_hints(&hints, logged_in);
+            self.health_tracker.record_failure(&key, ClientFailureKind::MediaForbidden, Some(&scope));
 
             // An upload's failed HEAD is a demotion, never a rejection. Metrolist stopped
             // validating privately-owned tracks outright (PR #3517) because a HEAD against one
@@ -533,6 +559,7 @@ impl Orchestrator {
         let cipher = self.cipher.clone();
         let potoken = self.potoken.clone();
         let failed = self.web_remix_failed.clone();
+        let health = self.health_tracker.clone();
         tauri::async_runtime::spawn(async move {
             // The session PoToken now outlives the process, so a rejected web stream is the only
             // signal left that Google stopped honouring it early. Drop it here rather than replay
@@ -540,6 +567,7 @@ impl Orchestrator {
             potoken.invalidate_session_token().await;
             if cipher.on_stream_rejected().await {
                 failed.lock().await.clear();
+                health.clear();
             }
         });
     }

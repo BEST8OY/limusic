@@ -1,7 +1,9 @@
 //! Playback client catalog and content-aware fallback strategy.
 //! Port of MetrolistGroup/innertubex `PlaybackClientCatalog` and `ContentAwareFallbackStrategy`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 use crate::clients::{Clients, YouTubeClient};
 
@@ -169,6 +171,101 @@ pub trait ClientHealthMonitor: Send + Sync {
     }
     fn record_success(&self, _client_id: &str, _scope: Option<&ClientHealthScope>) {}
     fn record_failure(&self, _client_id: &str, _kind: ClientFailureKind, _scope: Option<&ClientHealthScope>) {}
+}
+
+#[derive(Debug, Clone)]
+struct HealthEntry {
+    failure_count: u32,
+    last_failure: Instant,
+    last_kind: Option<ClientFailureKind>,
+}
+
+/// Thread-safe in-memory health tracker monitoring client success and failure rates.
+///
+/// Ports runtime health tracking from MetrolistGroup/innertubex `ClientHealthTracker`.
+/// Dynamically applies penalty adjustments to failing or rate-limited clients (e.g. MediaForbidden)
+/// with a decaying time-to-live cooldown.
+#[derive(Debug)]
+pub struct SimpleHealthTracker {
+    ttl: Duration,
+    records: RwLock<HashMap<String, HealthEntry>>,
+}
+
+impl Default for SimpleHealthTracker {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(5 * 60))
+    }
+}
+
+impl SimpleHealthTracker {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            records: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Clear all failure records (e.g. on self-heal or config refresh).
+    pub fn clear(&self) {
+        if let Ok(mut records) = self.records.write() {
+            records.clear();
+        }
+    }
+}
+
+impl ClientHealthMonitor for SimpleHealthTracker {
+    fn score_adjustment(&self, client_id: &str, _scope: Option<&ClientHealthScope>) -> i32 {
+        let records = match self.records.read() {
+            Ok(r) => r,
+            Err(_) => return 0,
+        };
+        let Some(entry) = records.get(client_id) else {
+            return 0;
+        };
+        if entry.last_failure.elapsed() >= self.ttl {
+            return 0;
+        }
+
+        let base_penalty = match entry.last_kind {
+            Some(ClientFailureKind::MediaForbidden) => -50,
+            Some(ClientFailureKind::Token) => -40,
+            Some(ClientFailureKind::PlayerRequest) => -30,
+            _ => -20,
+        };
+
+        let repeat_penalty = (entry.failure_count.saturating_sub(1) as i32) * -15;
+        (base_penalty + repeat_penalty).max(-100)
+    }
+
+    fn record_success(&self, client_id: &str, _scope: Option<&ClientHealthScope>) {
+        if let Ok(mut records) = self.records.write() {
+            records.remove(client_id);
+        }
+    }
+
+    fn record_failure(
+        &self,
+        client_id: &str,
+        kind: ClientFailureKind,
+        _scope: Option<&ClientHealthScope>,
+    ) {
+        if let Ok(mut records) = self.records.write() {
+            let now = Instant::now();
+            let entry = records.entry(client_id.to_string()).or_insert_with(|| HealthEntry {
+                failure_count: 0,
+                last_failure: now,
+                last_kind: Some(kind),
+            });
+            entry.failure_count = entry.failure_count.saturating_add(1);
+            entry.last_failure = now;
+            entry.last_kind = Some(kind);
+
+            if records.len() > 32 {
+                let ttl = self.ttl;
+                records.retain(|_, v| v.last_failure.elapsed() < ttl);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -383,6 +480,24 @@ impl ContentAwareFallbackStrategy {
         Self
     }
 
+    /// Select and prioritize clients for stream extraction given the content hints, auth state, and an optional health monitor.
+    pub fn select_clients_with_health<'a>(
+        &self,
+        clients: &'a Clients,
+        hints: &ContentHints,
+        authenticated: bool,
+        excluded_clients: &HashSet<String>,
+        health_monitor: Option<&dyn ClientHealthMonitor>,
+    ) -> Vec<SelectedClient<'a>> {
+        let req = ClientSelectionRequest {
+            hints: hints.clone(),
+            authenticated,
+            excluded_clients: excluded_clients.clone(),
+            ..Default::default()
+        };
+        self.select_clients_detailed(clients, &req, health_monitor).candidates
+    }
+
     /// Select and prioritize clients for stream extraction given the content hints and auth state.
     pub fn select_clients<'a>(
         &self,
@@ -391,13 +506,7 @@ impl ContentAwareFallbackStrategy {
         authenticated: bool,
         excluded_clients: &HashSet<String>,
     ) -> Vec<SelectedClient<'a>> {
-        let req = ClientSelectionRequest {
-            hints: hints.clone(),
-            authenticated,
-            excluded_clients: excluded_clients.clone(),
-            ..Default::default()
-        };
-        self.select_clients_detailed(clients, &req, None).candidates
+        self.select_clients_with_health(clients, hints, authenticated, excluded_clients, None)
     }
 
     /// Select candidates and collect rejected clients with rich diagnostics matching the Kotlin ContentAwareFallbackStrategy.
@@ -610,7 +719,9 @@ impl ContentAwareFallbackStrategy {
             }
 
             if let Some(monitor) = health_monitor {
-                let adj = monitor.score_adjustment(m.id, Some(&scope));
+                let adj_id = monitor.score_adjustment(m.id, Some(&scope));
+                let adj_key = monitor.score_adjustment(m.client_key, Some(&scope));
+                let adj = adj_id.min(adj_key);
                 if adj != 0 {
                     score += adj;
                     reasons.push(format!("runtime-health={:+}", adj));
@@ -732,4 +843,22 @@ mod tests {
         let visionos = result.candidates.iter().find(|c| c.manifest.id == "VISIONOS_0_1").unwrap();
         assert!(visionos.reasons.iter().any(|r| r == "runtime-health=-50"));
     }
+
+    #[test]
+    fn simple_health_tracker_penalizes_and_recovers() {
+        let tracker = SimpleHealthTracker::new(Duration::from_secs(60));
+        assert_eq!(tracker.score_adjustment("VISIONOS", None), 0);
+
+        tracker.record_failure("VISIONOS", ClientFailureKind::MediaForbidden, None);
+        assert_eq!(tracker.score_adjustment("VISIONOS", None), -50);
+
+        // Escalates on repeated failure
+        tracker.record_failure("VISIONOS", ClientFailureKind::MediaForbidden, None);
+        assert_eq!(tracker.score_adjustment("VISIONOS", None), -65);
+
+        // Recovers on success
+        tracker.record_success("VISIONOS", None);
+        assert_eq!(tracker.score_adjustment("VISIONOS", None), 0);
+    }
 }
+

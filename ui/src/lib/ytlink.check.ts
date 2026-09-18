@@ -44,6 +44,8 @@ ok(
 );
 ok(target('https://youtu.be/dQw4?si=xyz') === 'song:dQw4', 'youtu.be short links, tracking and all');
 ok(target('https://www.youtube.com/watch?v=dQw4') === 'song:dQw4', 'the video site counts too');
+ok(target('https://www.youtube.com/shorts/dQw4') === 'song:dQw4', 'a youtube shorts link is the song');
+ok(target('https://youtube.com/shorts/dQw4?feature=share') === 'song:dQw4', 'shorts link with params');
 ok(target('music.youtube.com/playlist?list=PLabc') === 'playlist:VLPLabc', 'a pasted bare host');
 ok(target('  https://youtu.be/dQw4  ') === 'song:dQw4', 'surrounding whitespace is trimmed');
 
