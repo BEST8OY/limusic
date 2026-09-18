@@ -12,12 +12,14 @@
 		KeyboardIcon,
 		Cancel01Icon as RemoveIcon,
 		Copy01Icon,
-		Coffee02Icon
+		Coffee02Icon,
+		DiscordIcon
 	} from '@hugeicons/core-free-icons';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Switch } from '$lib/components/ui/switch';
 	import { Slider } from '$lib/components/ui/slider';
+	import { LEVELS as ZOOM_LEVELS, setZoom, zoom } from '$lib/zoom.svelte';
 	import { Alert, AlertDescription } from '$lib/components/ui/alert';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Select from '$lib/components/ui/select';
@@ -28,6 +30,7 @@
 	import { win } from '$lib/win.svelte';
 	import ColorPicker from '$lib/components/ColorPicker.svelte';
 	import Changelog from '$lib/components/Changelog.svelte';
+	import DiscordSettings from '$lib/components/DiscordSettings.svelte';
 	import {
 		THEMES,
 		FONTS,
@@ -61,11 +64,12 @@
 	import { t, setLocale, currentLocale, LOCALES, type LocaleId } from '$lib/i18n.svelte';
 	import { appIcon, chooseAppIcon } from '$lib/appicon.svelte';
 
-	type TabId = 'general' | 'themes' | 'playback' | 'data' | 'about';
+	type TabId = 'general' | 'themes' | 'playback' | 'discord' | 'data' | 'about';
 	const TABS = $derived<{ id: TabId; label: string; hint: string; icon: typeof Settings02Icon }[]>([
 		{ id: 'general', label: t('settings.tabs.general'), hint: t('settings.tabs.general_hint'), icon: Settings02Icon },
 		{ id: 'themes', label: t('settings.tabs.themes'), hint: t('settings.tabs.themes_hint'), icon: PaintBoardIcon },
 		{ id: 'playback', label: t('settings.tabs.playback'), hint: t('settings.tabs.playback_hint'), icon: PlayCircleIcon },
+		{ id: 'discord', label: t('settings.tabs.discord'), hint: t('settings.tabs.discord_hint'), icon: DiscordIcon },
 		{ id: 'data', label: t('settings.tabs.data'), hint: t('settings.tabs.data_hint'), icon: Database02Icon },
 		{ id: 'about', label: t('settings.tabs.about'), hint: t('settings.tabs.about_hint'), icon: InformationCircleIcon }
 	]);
@@ -77,11 +81,11 @@
 		'mb-2 px-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground';
 	const CARD = 'divide-y divide-border/60 overflow-hidden rounded-xl border bg-card';
 
-	const ACCENT_THEMES = THEMES.filter((t) => t.kind === 'accent');
-	const PALETTE_THEMES = THEMES.filter((t) => t.kind === 'palette');
 	const currentTheme = $derived(THEMES.find((t) => t.id === theme.id) ?? THEMES[0]);
 
 	// --- Themes tab ---
+	const pct = (level: number) => `${Math.round(level * 100)}%`;
+
 	type FontKey = 'fontSans' | 'fontHeading';
 	const FONT_ROWS: { key: FontKey; label: string; hint: string }[] = $derived([
 		{
@@ -296,11 +300,16 @@
 	// for. Same test in `player.svelte.ts`, which hydrates `prefs` at launch.
 	const musicVideosOn = $derived(settings.music_videos === 'true');
 	const boiduOn = $derived(settings.lyrics_boidu !== 'false');
+	// Off by default: the full byline is what YouTube credits, and cutting it is a preference
+	// with a real failure mode (a comma-joined duo name), not a fix (issue #231).
+	const lastfmPrimaryOn = $derived(settings.lastfm_primary_artist === 'true');
+	// Sub-setting of the one above: also cut at "&", which costs the joint acts that have their
+	// own Last.fm page. Only reachable while the parent is on.
+	const lastfmStrictOn = $derived(settings.lastfm_primary_strict === 'true');
 	const preventDuplicatesOn = $derived(settings.prevent_duplicates === 'true');
 	// Off by default: shuffle applies to the queue it was turned on for (issue #117).
 	const stickyShuffleOn = $derived(settings.sticky_shuffle === 'true');
 	const updateBannerOn = $derived(settings.update_banner !== 'false');
-	const discordOn = $derived(settings.discord_rpc === 'true');
 	const trayOn = $derived(settings.close_to_tray !== 'false');
 	const autostartOn = $derived(settings.autostart === 'true');
 	// `native_chrome` is read-only and platform-derived (commands.rs). `overlay` is macOS, where the
@@ -353,6 +362,16 @@
 		await api.setSetting('hide_videos', settings.hide_videos);
 	}
 
+	async function setLastfmPrimary(on: boolean) {
+		settings.lastfm_primary_artist = on ? 'true' : 'false';
+		await api.setSetting('lastfm_primary_artist', settings.lastfm_primary_artist);
+	}
+
+	async function setLastfmStrict(on: boolean) {
+		settings.lastfm_primary_strict = on ? 'true' : 'false';
+		await api.setSetting('lastfm_primary_strict', settings.lastfm_primary_strict);
+	}
+
 	async function setBoidu(on: boolean) {
 		settings.lyrics_boidu = on ? 'true' : 'false';
 		await api.setSetting('lyrics_boidu', settings.lyrics_boidu);
@@ -371,11 +390,6 @@
 	async function setUpdateBanner(on: boolean) {
 		settings.update_banner = on ? 'true' : 'false';
 		await api.setSetting('update_banner', settings.update_banner);
-	}
-
-	async function setDiscord(on: boolean) {
-		settings.discord_rpc = on ? 'true' : 'false';
-		await api.setSetting('discord_rpc', settings.discord_rpc);
 	}
 
 	async function setTray(on: boolean) {
@@ -471,10 +485,16 @@
 {/snippet}
 
 <Dialog.Root bind:open={ui.settingsOpen}>
-	<Dialog.Content class="gap-0 overflow-hidden p-0 sm:max-w-3xl">
+	<!-- The Discord tab puts its live preview *beside* the controls rather than under them, so it
+	     needs the extra width; every other tab reads better narrow. Deliberately not animated:
+	     transitioning the width relayouts the whole modal every frame, and WebKitGTK is the webview
+	     that would pay for it. -->
+	<Dialog.Content
+		class="gap-0 overflow-hidden p-0 {tab === 'discord' ? 'sm:max-w-5xl' : 'sm:max-w-3xl'}"
+	>
 		<Dialog.Description class="sr-only">{t('settings.title')}</Dialog.Description>
 
-		<div class="flex h-[min(34rem,72vh)]">
+		<div class="flex h-[min(38rem,80vh)]">
 			<!-- Tab rail -->
 			<nav class="flex w-52 shrink-0 flex-col border-r bg-muted/40 p-3">
 				<Dialog.Title class="px-3 pt-1 pb-4 font-heading text-base font-semibold">
@@ -514,6 +534,9 @@
 					<p class="truncate text-xs text-muted-foreground">{currentTab.hint}</p>
 				</header>
 
+				{#if loaded && tab === 'discord'}
+					<DiscordSettings {settings} />
+				{:else}
 				<div class="min-w-0 flex-1 overflow-y-auto px-6 py-5">
 					{#if !loaded}
 						<p class="text-sm text-muted-foreground">{t('common.loading')}</p>
@@ -551,11 +574,6 @@
 									title: t('player.history'),
 									desc: t('settings.playback.play_history_hint'),
 									control: historySwitch
-								})}
-								{@render row({
-									title: t('settings.general.discord_rpc'),
-									desc: t('settings.general.discord_rpc_hint'),
-									control: discordSwitch
 								})}
 							</div>
 						</section>
@@ -599,15 +617,20 @@
 								{@render row({
 									title: t('settings.themes.background_color'),
 									desc:
-										currentTheme.kind === 'palette'
-											? t('settings.themes.tint_palette_hint', { theme: currentTheme.label })
-											: t('settings.themes.tint_hint'),
+										theme.id === 'default'
+											? t('settings.themes.tint_hint')
+											: t('settings.themes.tint_palette_hint', { theme: currentTheme.label }),
 									control: tintSlider
 								})}
 								{@render row({
 									title: t('settings.themes.roundness'),
 									desc: t('settings.themes.roundness_hint'),
 									control: radiusSlider
+								})}
+								{@render row({
+									title: t('settings.themes.zoom'),
+									desc: t('settings.themes.zoom_hint'),
+									control: zoomSelect
 								})}
 								{@render row({
 									title: t('settings.themes.app_icon'),
@@ -729,6 +752,25 @@
 									desc: t('settings.playback.blocked_artists_hint'),
 									below: blockedList
 								})}
+							</div>
+						</section>
+						<section class={GROUP}>
+							<h3 class={LABEL}>{t('settings.sections.scrobbling')}</h3>
+							<div class={CARD}>
+								{@render row({
+									title: t('settings.playback.lastfm_primary_artist'),
+									desc: t('settings.playback.lastfm_primary_artist_hint'),
+									control: lastfmPrimarySwitch,
+									tall: true
+								})}
+								{#if lastfmPrimaryOn}
+									{@render row({
+										title: t('settings.playback.lastfm_primary_strict'),
+										desc: t('settings.playback.lastfm_primary_strict_hint'),
+										control: lastfmStrictSwitch,
+										tall: true
+									})}
+								{/if}
 							</div>
 						</section>
 						<section class={GROUP}>
@@ -857,6 +899,7 @@
 						</section>
 					{/if}
 				</div>
+				{/if}
 			</div>
 		</div>
 	</Dialog.Content>
@@ -883,7 +926,6 @@
 {/snippet}
 
 {#snippet historySwitch()}<Switch checked={historyOn} onCheckedChange={setHistory} />{/snippet}
-{#snippet discordSwitch()}<Switch checked={discordOn} onCheckedChange={setDiscord} />{/snippet}
 {#snippet traySwitch()}<Switch checked={trayOn} onCheckedChange={setTray} />{/snippet}
 {#snippet autostartSwitch()}<Switch checked={autostartOn} onCheckedChange={setAutostart} />{/snippet}
 {#snippet systemTitlebarSwitch()}<Switch
@@ -901,6 +943,14 @@
 	/>{/snippet}
 {#snippet musicVideoSwitch()}<Switch checked={musicVideosOn} onCheckedChange={setMusicVideos} />{/snippet}
 {#snippet hideVideoSwitch()}<Switch checked={hideVideosOn} onCheckedChange={setHideVideos} />{/snippet}
+{#snippet lastfmPrimarySwitch()}<Switch
+		checked={lastfmPrimaryOn}
+		onCheckedChange={setLastfmPrimary}
+	/>{/snippet}
+{#snippet lastfmStrictSwitch()}<Switch
+		checked={lastfmStrictOn}
+		onCheckedChange={setLastfmStrict}
+	/>{/snippet}
 {#snippet boiduSwitch()}<Switch checked={boiduOn} onCheckedChange={setBoidu} />{/snippet}
 {#snippet bannerSwitch()}<Switch checked={updateBannerOn} onCheckedChange={setUpdateBanner} />{/snippet}
 {#snippet openPlayerSwitch()}<Switch
@@ -924,36 +974,21 @@
 	<Select.Root type="single" value={theme.id} onValueChange={(v) => applyTheme(v as ThemeId)}>
 		<Select.Trigger class="w-44 shrink-0" aria-label={t('a11y.theme')}>
 			<span
-				class="size-4 shrink-0 rounded-full ring-1 ring-black/10"
+				class="size-4 shrink-0 rounded-full ring-1 ring-foreground/20"
 				style="background:{currentTheme.color}"
 			></span>
 			<span class="flex-1 truncate text-left">{currentTheme.label}</span>
 		</Select.Trigger>
 		<Select.Content>
-			<Select.Group>
-				<Select.GroupHeading>{t('settings.themes.accent_colors')}</Select.GroupHeading>
-				{#each ACCENT_THEMES as th (th.id)}
-					<Select.Item value={th.id} label={th.label}>
-						<span
-							class="size-4 shrink-0 rounded-full ring-1 ring-black/10"
-							style="background:{th.color}"
-						></span>
-						{th.label}
-					</Select.Item>
-				{/each}
-			</Select.Group>
-			<Select.Group>
-				<Select.GroupHeading>{t('settings.themes.palettes')}</Select.GroupHeading>
-				{#each PALETTE_THEMES as th (th.id)}
-					<Select.Item value={th.id} label={th.label}>
-						<span
-							class="size-4 shrink-0 rounded-full ring-1 ring-black/10"
-							style="background:{th.color}"
-						></span>
-						{th.label}
-					</Select.Item>
-				{/each}
-			</Select.Group>
+			{#each THEMES as th (th.id)}
+				<Select.Item value={th.id} label={th.label}>
+					<span
+						class="size-4 shrink-0 rounded-full ring-1 ring-foreground/20"
+						style="background:{th.color}"
+					></span>
+					{th.label}
+				</Select.Item>
+			{/each}
 		</Select.Content>
 	</Select.Root>
 {/snippet}
@@ -981,7 +1016,7 @@
 		aria-label={t('a11y.background_tint')}
 		max={360}
 		step={1}
-		disabled={currentTheme.kind === 'palette'}
+		disabled={theme.id !== 'default'}
 		value={effective.hue}
 		onValueChange={(hue) => setCustom({ hue })}
 		class="w-44 shrink-0 [&_[data-slot=slider-range]]:bg-transparent [&_[data-slot=slider-track]]:bg-[linear-gradient(to_right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)]"
@@ -1002,6 +1037,19 @@
 			{effective.radius.toFixed(2)}
 		</span>
 	</div>
+{/snippet}
+
+{#snippet zoomSelect()}
+	<Select.Root type="single" value={String(zoom.level)} onValueChange={(v) => setZoom(Number(v))}>
+		<Select.Trigger class="w-44 shrink-0" aria-label={t('a11y.zoom')}>
+			<span class="flex-1 text-left">{pct(zoom.level)}</span>
+		</Select.Trigger>
+		<Select.Content>
+			{#each ZOOM_LEVELS as lv (lv)}
+				<Select.Item value={String(lv)} label={pct(lv)}>{pct(lv)}</Select.Item>
+			{/each}
+		</Select.Content>
+	</Select.Root>
 {/snippet}
 
 {#snippet fontSelect(key: FontKey, label: string)}

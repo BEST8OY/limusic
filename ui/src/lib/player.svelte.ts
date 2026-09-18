@@ -53,7 +53,12 @@ export const np = $state({ open: false, tab: 'queue' as 'queue' | 'lyrics' });
  * local state). Hydrated once in `initApp`; the modal writes here too, so a toggle takes effect
  * without a reload.
  */
-export const prefs = $state({ musicVideos: false });
+export const prefs = $state({
+	musicVideos: false,
+	/** `discord_rpc`. Two places toggle it (the titlebar button and the Discord settings tab) and
+	 *  each drew its own indicator, so turning it off in one left the other stale. One owner. */
+	discordRpc: false
+});
 
 /** videoId → the in-flight or settled loopback URL for its music video (null when it has none).
  *
@@ -437,7 +442,7 @@ function savePersonal() {
 export function addPick(item: BrowseItem) {
 	const added = pl.addPick(personal, item);
 	savePersonal();
-	toast.success(added ? 'Added to shortcuts' : 'Already in shortcuts');
+	toast.success(t(added ? 'toasts.added_to_shortcuts' : 'toasts.already_in_shortcuts'));
 }
 
 /** Drop landed: move (or add) a tile so it sits before `beforeId` — null appends. No toast: the
@@ -726,12 +731,12 @@ export function ratingOf(song: SongItem): Rating {
 
 export const isLiked = (song: SongItem): boolean => ratingOf(song) === 'like';
 
-/** Like/unlike whatever is playing. Thin wrapper so the player bar and the mini player share one
+/** Rate whatever is playing. Thin wrapper so the player bar and the mini player share one
  *  implementation (and one optimistic path) with every list row. */
-export function toggleNowPlayingLike(): Promise<void> {
+export function toggleNowPlayingRating(want: 'like' | 'dislike' = 'like'): Promise<void> {
 	const n = playback.now;
 	if (!n) return Promise.resolve();
-	return toggleRating({ video_id: n.videoId, title: n.title, artists: n.artists }, 'like');
+	return toggleRating({ video_id: n.videoId, title: n.title, artists: n.artists }, want);
 }
 
 // --- Volume ------------------------------------------------------------------------------------
@@ -830,11 +835,10 @@ export function cycleRepeat(): Promise<void> {
 	return api.setRepeat(r === 'off' ? 'all' : r === 'all' ? 'one' : 'off');
 }
 
-const RATED: Record<Rating, string> = {
-	like: 'Added to liked songs',
-	dislike: 'Disliked',
-	indifferent: 'Rating removed'
-};
+// A function, not a const map: a map built at module load freezes whatever language was active
+// then, and the language can be changed without a reload.
+const rated = (r: Rating) =>
+	t(r === 'like' ? 'toasts.liked' : r === 'dislike' ? 'toasts.disliked' : 'toasts.rating_removed');
 
 /** Optimistic rating change, reverted if YouTube rejects it. `msg` overrides the toast, for the
  *  callers that clear a like by another name (out of Library ▸ Songs, which is that same list). */
@@ -854,7 +858,7 @@ async function rate(song: SongItem, next: Rating, msg?: string) {
 		// Library ▸ Songs *is* the liked-videos browse, and its tab paints from the cache without
 		// revalidating, so a like from anywhere else has to drop it or the row is missing for 5 min.
 		invalidateCached(LIBRARY_SONGS_KEY);
-		toast.success(msg ?? RATED[next]);
+		toast.success(msg ?? rated(next));
 		if (next === 'dislike') dropDisliked(song.video_id, isNow);
 	} catch (e) {
 		ratings[song.video_id] = prev;
@@ -999,8 +1003,12 @@ export async function enqueue(
 	}
 	if (lt.role === 'guest') return;
 	const n = items.length;
-	if (next) toast.success(n === 1 ? 'Playing next' : `${n} songs play next`);
-	else toast.success(n === 1 ? 'Added to queue' : `Added ${n} songs to the queue`);
+	if (next)
+		toast.success(n === 1 ? t('toasts.playing_next_one') : t('toasts.playing_next', { count: n }));
+	else
+		toast.success(
+			n === 1 ? t('toasts.added_to_queue_one') : t('toasts.added_to_queue', { count: n })
+		);
 }
 
 /**
@@ -1025,6 +1033,7 @@ export async function startRadio(
 // Transient UI state for write actions.
 export const ui = $state({
 	addSongs: null as SongItem[] | null, // add-to-playlist picker target(s), full items for optimistic appends
+	addPending: false, // one playlist batch at a time, even after the picker closes
 	share: null as BrowseItem | null, // the share modal's target
 	toast: null as Toast | null,
 	settingsOpen: false, // the settings modal
@@ -1036,11 +1045,27 @@ export const ui = $state({
 	channelPickerOpen: false,
 	channelPickerRequired: false, // true while a multi-channel login is not finalized yet
 	channelIdentities: [] as AccountIdentity[],
+	// Bumped by `refreshView`. The root layout keys the page on it alongside `auth.epoch`, so a
+	// refresh remounts the current route the same way a sign-in does.
+	epoch: 0,
 	// Manual sidebar collapse, lg and up (below that the rail is already collapsed by the
 	// breakpoint). Here rather than in Sidebar because the now-playing view and the fullscreen
 	// lyrics panel are overlays that offset themselves by the sidebar's width.
 	sidebarCollapsed: browser && localStorage.getItem('sidebar_collapsed') === '1'
 });
+
+/**
+ * Reload whatever page is on screen (the titlebar's refresh button, F5). Browse responses are
+ * cached for five minutes, so dropping the cache is half of it and remounting the route is the
+ * other half: every page fetches in `onMount`, so a remount is what re-runs the load.
+ *
+ * YouTube rotates the home feed per request (about a third of "Quick picks" comes back different),
+ * which is what #177 was asking for; there is no per-shelf endpoint to refresh less than this.
+ */
+export function refreshView() {
+	clearCached();
+	ui.epoch++;
+}
 
 export function openChannelPicker(required = false) {
 	ui.channelPickerRequired = required;
@@ -1079,11 +1104,12 @@ export function openShare(item: BrowseItem) {
 }
 
 export function openAddToPlaylist(song: SongItem) {
-	ui.addSongs = [song];
+	openAddManyToPlaylist([song]);
 }
 
 /** Open the picker to add several tracks at once (e.g. a whole album). */
 export function openAddManyToPlaylist(songs: SongItem[]) {
+	if (ui.addPending) return;
 	ui.addSongs = songs.length ? songs : null;
 }
 
@@ -1241,7 +1267,10 @@ export function initApp(mini = false): () => void {
 		.catch(() => {});
 	if (mini) return teardown;
 	api.getSettings()
-		.then((s) => (prefs.musicVideos = s.music_videos === 'true'))
+		.then((s) => {
+			prefs.musicVideos = s.music_videos === 'true';
+			prefs.discordRpc = s.discord_rpc === 'true';
+		})
 		.catch(() => {});
 	api.getAccount()
 		.then((a) => {

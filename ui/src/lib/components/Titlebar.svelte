@@ -13,6 +13,7 @@
 	import {
 		ArrowLeft01Icon,
 		ArrowRight01Icon,
+		Refresh03Icon,
 		MinusSignIcon,
 		SquareIcon,
 		Cancel01Icon,
@@ -29,7 +30,7 @@
 	import AccountMenu from './AccountMenu.svelte';
 	import { appIcon } from '$lib/appicon.svelte';
 	import * as api from '$lib/api';
-	import { openMiniPlayer, playback, toast, ui } from '$lib/player.svelte';
+	import { openMiniPlayer, playback, prefs, refreshView, toast, ui } from '$lib/player.svelte';
 	import { win } from '$lib/win.svelte';
 	import { lt } from '$lib/lt.svelte';
 	import { anchorMenu, fitMenu, NO_ANCHOR } from '$lib/menu';
@@ -59,25 +60,24 @@
 	let anchor = $state(NO_ANCHOR);
 
 	// Discord Rich Presence — a plain on/off toggle of the `discord_rpc` setting (the backend
-	// connects/clears the presence the moment it flips). Optimistic; reverted on failure.
-	let discordOn = $state(false);
+	// connects/clears the presence the moment it flips). Optimistic; reverted on failure. The flag
+	// lives in `prefs` because the Discord settings tab toggles the same thing: a local copy here
+	// went stale the moment the other one was used.
+	const discordOn = $derived(prefs.discordRpc);
 
 	async function toggleDiscord() {
 		const next = !discordOn;
-		discordOn = next;
+		prefs.discordRpc = next;
 		try {
 			await api.setSetting('discord_rpc', next ? 'true' : 'false');
 			toast.success(next ? t('integrations.discord_on') : t('integrations.discord_off'));
 		} catch (e) {
-			discordOn = !next;
+			prefs.discordRpc = !next;
 			toast.error(String(e));
 		}
 	}
 
 	onMount(() => {
-		api.getSettings()
-			.then((s) => (discordOn = s.discord_rpc === 'true'))
-			.catch(() => {});
 		api.lastfmStatus()
 			.then((s) => {
 				connected = s.connected;
@@ -174,6 +174,18 @@
 			aria-label={t('common.forward')}
 		>
 			<HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2.5} class="h-5 w-5" />
+		</button>
+		<!-- Third in the browser's own control group, and read as such without a label. It drops the
+		     browse cache and remounts the page, which is the only way to ask YouTube for a different
+		     home feed: refetching rotates roughly a third of "Quick picks" (#177). Never disabled,
+		     since the page it reloads is always there; the route's own skeletons are the progress. -->
+		<button
+			class="flex h-full w-9 items-center justify-center text-foreground/80 transition-colors hover:bg-accent/10 hover:text-foreground"
+			onclick={refreshView}
+			title={t('common.refresh')}
+			aria-label={t('common.refresh')}
+		>
+			<HugeiconsIcon icon={Refresh03Icon} strokeWidth={2.5} class="h-4 w-4" />
 		</button>
 	</div>
 

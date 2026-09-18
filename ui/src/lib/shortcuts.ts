@@ -4,7 +4,7 @@
 // it also owns the ctrl+wheel gesture.
 import { browser } from '$app/environment';
 import * as api from './api';
-import { cycleRepeat, np, nudgeVolume, playback, toggleMute, ui } from './player.svelte';
+import { cycleRepeat, np, nudgeVolume, playback, refreshView, toggleMute, ui } from './player.svelte';
 
 const IS_MAC = browser && navigator.platform.startsWith('Mac');
 
@@ -21,6 +21,12 @@ export const HELP_COMBO = `${MOD}${HELP_KEY}`;
 /** `HELP_KEY` as the event reports it. A letter arrives in either case; `/` only ever as itself. */
 const isHelpKey = (key: string) => key === HELP_KEY || key === HELP_KEY.toLowerCase();
 
+/** macOS keeps ⌘M for the system "minimize the window", so mute asks for ⇧ on top there. */
+export const MUTE_COMBO = IS_MAC ? `${MOD}⇧M` : `${MOD}M`;
+
+/** Mute's key, shift and all. Elsewhere ⇧ is ignored, the way it always was for these letters. */
+const isMuteKey = (e: KeyboardEvent) => (e.key === 'm' || e.key === 'M') && (!IS_MAC || e.shiftKey);
+
 /** Percent per press, matching a step of the volume slider's arrow keys. */
 const VOLUME_STEP = 5;
 
@@ -33,6 +39,16 @@ const typing = (t: EventTarget | null) =>
  *  chrome that window doesn't render (palette, shortcut list, now-playing view). */
 export function initShortcuts(mini = false) {
 	const onKey = (e: KeyboardEvent) => {
+		// Focused controls (including track selection) have already handled this key.
+		if (e.defaultPrevented) return;
+		// F5 reloads the page here for the same reason it does in a browser, and like a browser it
+		// works from inside a text field too. Ctrl+R is not a second way in: that key cycles repeat.
+		// The mini widget has no page to reload, so it keeps the key for the OS.
+		if (!mini && e.key === 'F5') {
+			refreshView();
+			e.preventDefault();
+			return;
+		}
 		if (!e.ctrlKey && !e.metaKey) {
 			// Space also activates a focused button and scrolls the page, so it is swallowed either
 			// way once we know it isn't being typed.
@@ -47,6 +63,13 @@ export function initShortcuts(mini = false) {
 		// untouched, so the window still hides.
 		if (isHelpKey(e.key)) {
 			ui.shortcutsOpen = !ui.shortcutsOpen;
+			e.preventDefault();
+			return;
+		}
+		// Out of the switch for the same reason, and it has to read the whole event: on macOS a
+		// bare ⌘M falls through so AppKit still minimizes, and only ⌘⇧M mutes.
+		if (isMuteKey(e)) {
+			toggleMute();
 			e.preventDefault();
 			return;
 		}
@@ -78,10 +101,6 @@ export function initShortcuts(mini = false) {
 			case 'r':
 			case 'R':
 				cycleRepeat();
-				break;
-			case 'm':
-			case 'M':
-				toggleMute();
 				break;
 			// Shift+. and Shift+, on a US layout. The unshifted keys are accepted too, so the
 			// shortcut still works on layouts that put > and < somewhere else.

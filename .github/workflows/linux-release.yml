@@ -64,7 +64,10 @@ jobs:
     runs-on: ubuntu-24.04 # glibc 2.39 — see the header. NOT ubuntu-latest.
     # A healthy run is 9-12 min. The default is six hours, which is what a hung docker/Xvfb check or
     # a wedged package download would burn while the release sits half-published and unmarked.
-    timeout-minutes: 30
+    # The headroom over 12 is for the upload step: GitHub's asset endpoint had a bad afternoon
+    # during v0.7.3 and the AppImage that normally goes up in 18 seconds took 4m45s, after an
+    # attempt that moved nothing at all. Uploads retry, so the budget has to cover a few of those.
+    timeout-minutes: 45
     env:
       # mold instead of GNU ld: linking is the one part of a warm-cache build that isn't cached, so
       # it's most of what a release run actually spends time on. No clang needed, GCC 12.1+ resolves
@@ -430,14 +433,70 @@ jobs:
             local i
             for ((i = 1; i <= n; i++)); do
               "$@" && return 0
-              echo "::warning::attempt $i/$n failed: $*"
-              sleep $((i * 4))
+              # stderr, not stdout: `x="$(retry 3 gh api …)"` would otherwise capture this line.
+              echo "::warning::attempt $i/$n failed: $*" >&2
+              sleep $((i * 10))
             done
             return 1
           }
           fetch_manifest() { # fetch_manifest <dir>
             rm -rf "$1" && gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir "$1"
           }
+          # `gh release upload` has neither a timeout nor stall detection. When GitHub's asset
+          # origin (uploads.github.com) degrades, gh sits there with no output and no bytes moving,
+          # so the job hangs instead of failing and `retry` never gets its turn: v0.7.3 lost two
+          # Linux runs that way on an AppImage that had gone up in 18 seconds the day before, and
+          # the release sat half-published. It is not a size threshold. A probe that afternoon
+          # wedged on a 10 MiB blob while a 420 byte .sig went straight through.
+          #
+          # curl can tell a stalled upload from a slow one, which is the whole point: --speed-limit
+          # with --speed-time gives up once throughput has been under 32 KB/s for a minute, while an
+          # upload that is merely slow (the Linux one that eventually landed averaged 610 KB/s) runs
+          # to completion however long it takes. --max-time is the outer bound, for bytes that
+          # trickle just above the stall limit forever.
+          #
+          # Files go up one at a time, the signed artifact before its .sig, so a failure part-way
+          # cannot leave a .sig on the release beside a missing binary.
+          upload() { # upload <file…>
+            local f name id code state
+            for f in "$@"; do
+              # The API rewrites an asset name it does not like (a space becomes a dot) and stores
+              # it under the rewritten one, so sending the basename verbatim would leave the lookup
+              # below searching for a name that is not there and the re-upload answering 422.
+              # Sanitising first means what we send is what gets stored, and it is already URL-safe.
+              name="$(basename "$f")"; name="${name//[!A-Za-z0-9._-]/.}"
+              # What --clobber used to do. A killed upload also leaves the asset in the "starter"
+              # state, where it is listed with the right size, 404s on download, and blocks the name.
+              id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+                    --jq ".[] | select(.name == \"$name\") | .id" | head -1)"
+              if [ -n "$id" ]; then
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id" --silent || return 1
+              fi
+              code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+                --request POST --upload-file "$f" \
+                --speed-limit 32768 --speed-time 60 --max-time 900 \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "Content-Type: application/octet-stream" \
+                "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name")" \
+                || { echo "::warning::$name: the upload stalled or the connection failed" >&2; return 1; }
+              if [ "$code" != 201 ]; then
+                echo "::warning::$name: the asset endpoint answered HTTP $code" >&2; return 1
+              fi
+              # 201 is not quite proof, and this is the failure that would not announce itself:
+              # latest.json pointing at a "starter" asset is a release that looks complete here and
+              # 404s for every updater. Returning 1 sends `retry` round again, which deletes it.
+              state="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+                       --jq ".[] | select(.name == \"$name\") | .state" | head -1)"
+              if [ "$state" != uploaded ]; then
+                echo "::warning::$name: asset is in state '${state:-missing}', not 'uploaded'" >&2; return 1
+              fi
+              echo "uploaded $name"
+            done
+          }
+
+          # The asset endpoint is addressed by release id; every other call here takes the tag.
+          RELEASE_ID="$(retry 3 gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id)"
+          [ -n "$RELEASE_ID" ] || { echo "::error::no release found for $TAG"; exit 1; }
 
           APPIMAGE="$(ls target/release/bundle/appimage/limusic_${VERSION}_*.AppImage 2>/dev/null | head -1 || true)"
           SIG="$APPIMAGE.sig"
@@ -449,7 +508,7 @@ jobs:
             echo "::error::no .sig next to the AppImage — signing key missing, or createUpdaterArtifacts got turned off"; exit 1
           fi
 
-          retry 3 gh release upload "$TAG" "$APPIMAGE" "$SIG" --clobber --repo "$GITHUB_REPOSITORY"
+          retry 5 upload "$APPIMAGE" "$SIG"
 
           # The deb rides along unsigned and stays out of latest.json: Tauri's updater has no deb
           # support, so there is nothing for a signature to be checked by. Debian users update by
@@ -461,7 +520,7 @@ jobs:
           elif [ -z "$DEB" ]; then
             echo "::warning::no deb for $VERSION in target/release/bundle/deb — nothing attached"
           else
-            retry 3 gh release upload "$TAG" "$DEB" --clobber --repo "$GITHUB_REPOSITORY"
+            retry 3 upload "$DEB"
           fi
 
           # latest.json is the one thing both release workflows write, and they now run in parallel.
@@ -478,7 +537,7 @@ jobs:
             jq --arg sig "$(cat "$SIG")" --arg url "$URL" \
               '.platforms["linux-x86_64"] = { signature: $sig, url: $url }' \
               manifest/latest.json > latest.json
-            retry 3 gh release upload "$TAG" latest.json --clobber --repo "$GITHUB_REPOSITORY"
+            retry 3 upload latest.json
 
             sleep $((3 + RANDOM % 5))
             retry 3 fetch_manifest check

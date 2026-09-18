@@ -183,21 +183,30 @@
 	{:else if lyrics?.instrumental}
 		<p class="py-8 text-center text-lg text-muted-foreground">{t('lyrics.instrumental')} ♪</p>
 	{:else if lyrics && lyrics.synced}
-		<!-- Padding lets the first/last lines center-scroll. -->
-		<div class="py-[35vh] {expanded ? 'mx-auto max-w-3xl' : ''}">
+		<!-- Bottom padding only, so the last lines can still center-scroll. A matching top padding
+		     would put half a panel of void above line 1, which is all you see until the song has
+		     played far enough to scroll past it (issue #201). Instead the opening lines sit at the
+		     top and centering starts once there is room above, the way every other lyrics view
+		     behaves. -->
+		<div class="pb-[55vh] {expanded ? 'mx-auto max-w-3xl' : ''}">
 			{#each lyrics.lines as line, i (i)}
 				{@const isActive = i === activeIndex}
 				{@const isPast = i < activeIndex}
+				<!-- Dimming is `opacity` on the line, never a translucent text colour. A colour with
+				     alpha is composited glyph by glyph, so wherever two glyphs overlap the coverage
+				     adds up and the overlap comes out brighter than the rest of the line: very
+				     visible in scripts whose marks sit on top of the letters, Devanagari in issue
+				     #191. `opacity` paints the line opaque first and fades it once, as a group. -->
 				<button
 					data-line={i}
 					onclick={() => seekTo(line)}
-					class="block w-full origin-left cursor-pointer text-left font-heading font-bold leading-snug transition-[color,transform] duration-300 ease-out hover:text-foreground
+					class="block w-full origin-left cursor-pointer text-left font-heading font-bold leading-snug transition-[color,opacity,transform] duration-300 ease-out hover:text-foreground hover:opacity-100
 						{expanded ? 'py-3 text-3xl' : compact ? 'py-1 text-sm' : 'py-2 text-xl'}
 						{isActive
 						? 'scale-[1.04] text-foreground'
 						: isPast
-							? 'text-muted-foreground/40'
-							: 'text-muted-foreground/70'}"
+							? 'text-muted-foreground opacity-40'
+							: 'text-muted-foreground opacity-70'}"
 				>
 					{#if line.words && line.words.length > 0}
 						<!-- Word-by-Word Karaoke Sweep Animation (Better-Lyrics style, highly optimized) -->
@@ -222,7 +231,8 @@
 										{cleanText}
 									</span>
 								{:else}
-									<span class="inline-block {isWordEnd ? 'mr-[0.26em]' : ''} {isPast ? 'text-muted-foreground/40' : 'text-muted-foreground/70'}">
+									<!-- Colour and dimming both come from the line. -->
+									<span class="inline-block {isWordEnd ? 'mr-[0.26em]' : ''}">
 										{cleanText}
 									</span>
 								{/if}
@@ -243,7 +253,7 @@
 		</div>
 	{:else if lyrics}
 		<div
-			class="space-y-2 leading-relaxed text-foreground/90 {expanded
+			class="space-y-2 leading-relaxed text-foreground opacity-90 {expanded
 				? 'mx-auto max-w-3xl text-xl'
 				: compact
 					? 'text-xs'
