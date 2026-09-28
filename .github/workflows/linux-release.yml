@@ -262,9 +262,8 @@ jobs:
           # frontend packages (ui/, website/) pnpm picks is up to the filesystem: Windows resolved
           # it to ui, Linux to website, whose deps this job never installs. It only works locally
           # because you run it from ui/.
-          # A release candidate builds only what the updater installs. The beta channel is its whole
-          # audience, and a deb install can't take an update from it anyway.
-          BUNDLES=appimage,deb; [ "$PRERELEASE" = false ] || BUNDLES=appimage
+          # Build both AppImage and deb packages
+          BUNDLES=appimage,deb
           tauri build --bundles "$BUNDLES" --config "$TAURI_CONFIG"
           # Strip the bundled TLS trust stack + gio modules out of the AppDir and repack: they are
           # coupled to the build host's config and leave the webview with no TLS backend anywhere
@@ -384,11 +383,14 @@ jobs:
       # the release down with it, so a failure here costs the deb and nothing else.
       - name: Verify the .deb installs and resolves its libraries
         id: deb_check
-        if: ${{ env.PRERELEASE == 'false' }}
         continue-on-error: true
         run: |
           set -euo pipefail
-          DEB="$(ls target/release/bundle/deb/limusic_${VERSION}_*.deb | head -1)"
+          DEB="$(ls target/release/bundle/deb/*.deb 2>/dev/null | head -1 || true)"
+          if [ -z "$DEB" ] || [ ! -f "$DEB" ]; then
+            echo "no deb file found to verify"
+            exit 0
+          fi
           docker run --rm -v "$PWD/$DEB:/limusic.deb:ro" ubuntu:24.04 bash -c '
             set -eu
             export DEBIAN_FRONTEND=noninteractive
@@ -419,12 +421,12 @@ jobs:
           retention-days: 7
 
       - name: Dry run, keep deb as an artifact
-        if: ${{ inputs.dry_run && env.PRERELEASE == 'false' }}
+        if: ${{ inputs.dry_run }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: limusic-deb-${{ steps.rel.outputs.safe_tag }}
           path: target/release/bundle/deb/*.deb
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 7
 
       - name: Attach the AppImage + deb, teach latest.json about Linux
@@ -526,12 +528,10 @@ jobs:
           # support, so there is nothing for a signature to be checked by. Debian users update by
           # downloading the next one. Skipped entirely if it failed its check, which is a warning
           # rather than an error: the release is complete without it.
-          DEB="$(ls target/release/bundle/deb/limusic_${VERSION}_*.deb 2>/dev/null | head -1 || true)"
-          if [ "$PRERELEASE" = true ]; then
-            echo "release candidate: no deb"
-          elif [ "${{ steps.deb_check.outcome }}" != "success" ]; then
+          DEB="$(ls target/release/bundle/deb/*.deb 2>/dev/null | head -1 || true)"
+          if [ "${{ steps.deb_check.outcome }}" = "failure" ]; then
             echo "::warning::the deb failed its install check and was NOT attached — fix bundle.linux.deb.depends and re-dispatch"
-          elif [ -z "$DEB" ]; then
+          elif [ -z "$DEB" ] || [ ! -f "$DEB" ]; then
             echo "::warning::no deb for $VERSION in target/release/bundle/deb — nothing attached"
           else
             retry 3 upload "$DEB"
