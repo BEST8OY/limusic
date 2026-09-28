@@ -232,6 +232,7 @@ fn change_volume(state: &AppState, app: &AppHandle, f: impl FnOnce(i64) -> i64) 
         }
         state.db.set_setting("volume", &volume.to_string());
         let _ = app.emit("volume", volume);
+        state.set_media_volume(volume);
     }
 }
 
