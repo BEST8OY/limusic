@@ -419,12 +419,12 @@ jobs:
           retention-days: 7
 
       - name: Dry run, keep deb as an artifact
-        if: ${{ inputs.dry_run }}
+        if: ${{ inputs.dry_run && env.PRERELEASE == 'false' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: limusic-deb-${{ steps.rel.outputs.safe_tag }}
           path: target/release/bundle/deb/*.deb
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Attach the AppImage + deb, teach latest.json about Linux
