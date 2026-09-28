@@ -1,7 +1,7 @@
 //! The brain: videoId → a playable stream. Full context/06 algorithm.
 //!
 //! Phase 2: WEB_REMIX is the primary client (STS + PoToken + cipher/n-transform), with the
-//! direct-URL clients (VISIONOS → ANDROID_VR → IOS) as graceful fallback and rustypipe as the
+//! direct-URL client (VISIONOS) as graceful fallback and rustypipe as the
 //! last-ditch net. The context/06 critical behaviors are preserved: metadata from MAIN, the
 //! per-videoId WEB_REMIX failure memory, the HIGH two-pass, off-hot-path self-heal, and graceful
 //! PoToken/cipher degradation. Every client is HEAD-validated (see the note in `resolve`); for an
@@ -71,15 +71,35 @@ pub enum ResolveError {
     /// here is a session that needs signing in again. Issue #71.
     #[error("this upload could not be played. Try signing in to YouTube Music again ({0})")]
     UploadUnavailable(String),
+    /// Every client YouTube answered for this track wanted an account, and there is no session.
+    /// Distinct from `AllClientsFailed` because the user can fix this one: some networks and
+    /// regions get `LOGIN_REQUIRED` from every anonymous client, and signing in is the whole fix
+    /// (issue #292).
+    #[error("YouTube would not serve {0} without an account. Sign in from the account menu.")]
+    SignInRequired(String),
     /// A local file that was in the library but is no longer on disk (context: local.rs).
     #[error("this file is no longer on your disk: {0}")]
     LocalMissing(String),
+    /// Nothing answered at all: no client's `/player` call came back, and neither did the
+    /// rustypipe net. That is the network, a dead proxy or a captive portal, and it says nothing
+    /// about this particular track, so the queue must not skip past it or drop it.
+    #[error("could not reach YouTube. Check your connection and try again ({0})")]
+    Unreachable(String),
+}
+
+impl ResolveError {
+    /// Would every other track in the queue fail this way too? A caller deciding whether to skip
+    /// forward, or to delete a row, has to know: skipping is right for a track YouTube refused and
+    /// wrong for an outage, where it walks the whole queue and deletes what it passes.
+    pub fn affects_every_track(&self) -> bool {
+        matches!(self, ResolveError::Unreachable(_) | ResolveError::SignInRequired(_))
+    }
 }
 
 /// Client keys that need the `n`-transform applied to their stream URLs. context/06.
 const NEEDS_N_TRANSFORM: [&str; 4] = ["WEB", "WEB_REMIX", "WEB_CREATOR", "TVHTML5"];
 
-// WEB_REMIX is validated with a HEAD like every other client — see `validate_head`.
+// WEB_REMIX is validated like every other client, see `validate_stream`.
 
 /// A remembered best-but-not-ideal stream, for the HIGH two-pass (context/06 §4).
 struct Candidate {
@@ -105,6 +125,28 @@ pub struct Orchestrator {
 }
 
 const WEB_REMIX_BLACKLIST_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// How often the off-hot-path self-heal may run. It deletes the session PoToken, the cached
+/// `player.js` and the cipher webview, so re-running it per failed probe is expensive; and the
+/// probe it reacts to cannot tell a stale signature from a video whose URL googlevideo simply caps
+/// (see `validate_stream` and KNOWN-ISSUES KI-11), so most of what used to trigger it was not
+/// evidence about the cipher at all. Matches `cipher::config`'s own registry cooldown.
+const HEAL_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+/// One self-heal at a time, and not more than one per [`HEAL_COOLDOWN`]. Same shape as
+/// `session::claim_refresh`, and for the same reason: one bad minute throws off a burst of
+/// identical signals and each one used to pay the full price.
+/// ponytail: process-global, fine with one `Orchestrator` per process; move it onto `self` if a
+/// second one is ever built.
+fn claim_heal() -> bool {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let Ok(mut last) = LAST.lock() else { return false };
+    if last.is_some_and(|t| t.elapsed() < HEAL_COOLDOWN) {
+        return false;
+    }
+    *last = Some(Instant::now());
+    true
+}
 
 /// Record a failure, dropping expired entries on the way so the map cannot grow.
 fn blacklist_insert(map: &mut HashMap<String, Instant>, video_id: &str, now: Instant) {
@@ -152,6 +194,8 @@ impl Orchestrator {
         let prefer_high = matches!(quality, AudioQuality::High | AudioQuality::Auto);
         let logged_in = self.it.is_logged_in();
         let visitor = self.it.visitor_data();
+        let initial_order: &[&str] =
+            if is_upload { &UPLOAD_FALLBACK_ORDER } else { &STREAM_FALLBACK_ORDER };
         // Without the uploads-playlist context YouTube hands back upload URLs that expire in about
         // 32 seconds (Metrolist PR #3857). Harmless for ordinary tracks, so scoped to uploads.
         let playlist_id = is_upload.then_some("MLPT");
@@ -163,10 +207,18 @@ impl Orchestrator {
         // with its TTL, so this is usually free; may be None (timeout / broken webview) —
         // degrade gracefully.
         let main_client = self.clients.get(MAIN_CLIENT);
-        let session_pot_owned = match (main_client, &visitor) {
-            (Some(c), Some(vd)) if c.use_web_po_tokens && !disabled.contains(MAIN_CLIENT) => {
-                self.potoken.get_session_po_token(vd).await
-            }
+        // The token belongs to the *session*, not to WEB_REMIX. Gating the mint on the main
+        // client was harmless while WEB_REMIX was the only thing that wanted one; with
+        // TVHTML5_SIMPLY in the chain it meant that turning WEB_REMIX off silently turned off
+        // every other PoToken client with it, and they then skipped themselves for want of a
+        // token that was sitting valid in the cache. So ask whether anything we are actually
+        // going to try wants one.
+        let wants_pot = std::iter::once(MAIN_CLIENT)
+            .chain(initial_order.iter().copied())
+            .filter(|k| !disabled.contains(*k))
+            .any(|k| self.clients.get(k).is_some_and(|c| c.use_web_po_tokens));
+        let session_pot_owned = match &visitor {
+            Some(vd) if wants_pot => self.potoken.get_session_po_token(vd).await,
             _ => None,
         };
         let session_pot = session_pot_owned.as_deref();
@@ -201,6 +253,20 @@ impl Orchestrator {
         }
 
         let main_ok = main_resp.as_ref().is_some_and(|r| r.playability_status.is_ok());
+        // The main response's status was the one thing the log never showed, so a report where
+        // nothing played could not be told apart from one where only the fallbacks failed
+        // (issue #292). `reason` is YouTube's own sentence, which is what separates a country
+        // block from a bot check.
+        let mut login_wanted = false;
+        if let Some(r) = main_resp.as_ref().filter(|_| !main_ok) {
+            login_wanted = r.playability_status.status == "LOGIN_REQUIRED";
+            tracing::debug!(
+                client = main_key,
+                status = %r.playability_status.status,
+                reason = r.playability_status.reason.as_deref().unwrap_or(""),
+                "not OK"
+            );
+        }
         let has_high = main_resp
             .as_ref()
             .and_then(|r| r.streaming_data.as_ref())
@@ -252,6 +318,9 @@ impl Orchestrator {
         };
         let order: &[&str] = &fallback_keys;
         let mut best: Option<Candidate> = None;
+        // Did YouTube answer anything at all? A refusal is information about the track; silence is
+        // information about the network, and the two want opposite handling upstream.
+        let mut reached = main_resp.is_some();
         // A login client's upload URL that failed HEAD. Used only if nothing validates.
         let mut upload_fallback: Option<Candidate> = None;
         let last_idx: isize = order.len() as isize - 1;
@@ -286,11 +355,28 @@ impl Orchestrator {
                     continue;
                 }
                 let client_pot = if client.use_web_po_tokens { session_pot } else { None };
+                // A PoToken client with no token is a guaranteed UNPLAYABLE ("The page needs to
+                // be reloaded"), so spend nothing on it when minting degraded. The direct clients
+                // ahead of it need no token, which is what keeps the chain alive in that state
+                // (context/06 §graceful PoToken degradation).
+                if client.use_web_po_tokens && client_pot.is_none() {
+                    tracing::debug!(client = key, "no PoToken, skipping");
+                    continue;
+                }
                 let client_sts = if client.use_signature_timestamp { sts } else { None };
-                match self.it.player(client, video_id, playlist_id, client_sts, client_pot).await {
+                let answered =
+                    self.it.player(client, video_id, playlist_id, client_sts, client_pot).await;
+                reached |= answered.is_ok();
+                match answered {
                     Ok(r) if r.playability_status.is_ok() => (key.to_owned(), r),
                     Ok(r) => {
-                        tracing::debug!(client = key, status = %r.playability_status.status, "not OK");
+                        login_wanted |= r.playability_status.status == "LOGIN_REQUIRED";
+                        tracing::debug!(
+                            client = key,
+                            status = %r.playability_status.status,
+                            reason = r.playability_status.reason.as_deref().unwrap_or(""),
+                            "not OK"
+                        );
                         let scope = ClientHealthScope::from_hints(&hints, logged_in);
                         self.health_tracker.record_failure(&key, ClientFailureKind::Playability, Some(&scope));
                         continue;
@@ -322,16 +408,19 @@ impl Orchestrator {
                 continue;
             };
 
-            // Innertubex security check: validate media URL scheme & host
-            if validated_media_url(&url).is_err() {
+            // Innertubex security check: validate media URL scheme & host for YouTube streams
+            if is_youtube_stream(&url) && validated_media_url(&url).is_err() {
                 tracing::warn!(video_id, client = %key, url = %url, "stream URL failed host validation");
                 continue;
             }
 
-            // n-transform + &pot= for web clients (context/05, 06).
+            // n-transform + &pot= for web clients (context/05, 06). YouTube's own stream hosts
+            // only: an RSS-feed podcast's URL is the feed's own host, which must not be handed a
+            // PoToken (#294). Uploads stream from `c.youtube.com` and do need both (#308).
             let client = self.clients.get(&key);
-            let needs_n = client.is_some_and(|c| c.use_web_po_tokens)
-                || NEEDS_N_TRANSFORM.contains(&key.as_str());
+            let needs_n = is_youtube_stream(&url)
+                && (client.is_some_and(|c| c.use_web_po_tokens)
+                    || NEEDS_N_TRANSFORM.contains(&key.as_str()));
             if needs_n {
                 url = self.cipher.transform_n_param_in_url(&url).await;
                 if client.is_some_and(|c| c.use_web_po_tokens) {
@@ -360,25 +449,24 @@ impl Orchestrator {
             // - The last client had rustypipe behind it, so there was never nothing to fall
             //   through to; skipping the check only hid a dead URL until playback.
             // - WEB_REMIX skipped it on Metrolist's note that its authed URLs 403 on HEAD but
-            //   stream on GET. That holds for ExoPlayer, which fetches in bounded ranges. mpv opens
-            //   with `Range: bytes=0-`, and for the videos where googlevideo caps a WEB_REMIX URL
-            //   (only the first ~768 KiB is served, in <=256 KiB pieces) that open-ended request
-            //   gets the same 403 the HEAD does.
+            //   stream on GET. That holds for ExoPlayer, which fetches in bounded ranges, and
+            //   for the videos where googlevideo caps a WEB_REMIX URL (only the first ~768 KiB is
+            //   served, in <=256 KiB pieces) nothing past that opening ever arrives.
             //
-            // Measured on fresh URLs, HEAD agrees with what mpv gets every time: 200/206 for
-            // dQw4w9WgXcQ, 403/403 for XqZsoesa55w and D07O_cbJ_Rw. So the check costs one
-            // round trip and turns a guaranteed failed load, an error toast, a retry and a round
-            // of cipher/PoToken self-heal churn into a silent fall-through at resolve time.
+            // Measured on fresh URLs when this was a HEAD, it agreed with what mpv got every time:
+            // 200/206 for dQw4w9WgXcQ, 403/403 for XqZsoesa55w and D07O_cbJ_Rw. So the check costs
+            // one round trip and turns a guaranteed failed load, an error toast, a retry and a
+            // round of cipher/PoToken self-heal churn into a silent fall-through at resolve time.
             //
-            // It also stays correct if a valid PoToken lifts the cap on those videos: then HEAD
-            // passes and WEB_REMIX is used. Nothing here has to know which way that goes.
+            // It also stays correct if a valid PoToken lifts the cap on those videos: then the
+            // probe passes and WEB_REMIX is used. Nothing here has to know which way that goes.
             //
             // The probe sends exactly the headers `build` will hand mpv (same UA, cookie only
-            // where mpv gets one), because a HEAD that carries something the real GET does not
+            // where mpv gets one), because a probe that carries something the real GET does not
             // is not a prediction of anything. Issue #71.
             let headers =
                 stream_headers(client.map(|c| c.user_agent.clone()), self.it.cookie(), is_upload);
-            if self.validate_head(&url, &headers).await {
+            if self.validate_stream(&url, &headers, content_length(format)).await {
                 let scope = ClientHealthScope::from_hints(&hints, logged_in);
                 self.health_tracker.record_success(&key, Some(&scope));
                 let ping = main_ping.clone().or_else(|| playback_ping(&resp, &key));
@@ -398,7 +486,7 @@ impl Orchestrator {
             let scope = ClientHealthScope::from_hints(&hints, logged_in);
             self.health_tracker.record_failure(&key, ClientFailureKind::MediaForbidden, Some(&scope));
 
-            // An upload's failed HEAD is a demotion, never a rejection. Metrolist stopped
+            // An upload's failed probe is a demotion, never a rejection. Metrolist stopped
             // validating privately-owned tracks outright (PR #3517) because a HEAD against one
             // does not reliably predict its GET, and this app then went further and returned the
             // very first URL unvalidated. That made WEB_REMIX the only client an upload ever
@@ -411,7 +499,7 @@ impl Orchestrator {
             // is what the old code did, one or two round trips later.
             if is_upload {
                 if upload_fallback.is_none() {
-                    tracing::info!(video_id, client = %key, "upload stream failed HEAD, trying the next login client");
+                    tracing::info!(video_id, client = %key, "upload stream failed validation, trying the next login client");
                     let ping = main_ping.clone().or_else(|| playback_ping(&resp, &key));
                     upload_fallback =
                         Some(Candidate { format: format.clone(), url, expires, client: key, ping });
@@ -443,7 +531,7 @@ impl Orchestrator {
         // 6b. An upload nothing validated: hand back the first URL a login client produced
         // rather than skip the track. See the demotion note in the loop.
         if let Some(c) = upload_fallback {
-            tracing::warn!(video_id, client = %c.client, "no upload stream passed HEAD, using the first anyway");
+            tracing::warn!(video_id, client = %c.client, "no upload stream passed validation, using the first anyway");
             // Every login client's URL was refused, which is the one upload failure that does say
             // something about the session rather than about the track. Heal off the hot path so a
             // machine stuck on a rejected PoToken or a stale cipher can get itself out; without
@@ -472,6 +560,11 @@ impl Orchestrator {
         }
         tracing::info!(video_id, "all InnerTube clients exhausted → rustypipe fallback");
         match rustypipe_fallback::resolve(video_id, prefer_high).await {
+            Ok(c) if !self.validate_stream(&c.url, &HashMap::new(), Some(c.size)).await => {
+                tracing::warn!(video_id, "rustypipe URL serves only its first MiB, not playable");
+                // rustypipe answered, so the network is up and this failure is about the URL.
+                Err(nothing_played(video_id, logged_in, login_wanted, true))
+            }
             Ok(c) => Ok(PlaybackData {
                 video_id: video_id.to_owned(),
                 stream_url: c.url,
@@ -490,7 +583,12 @@ impl Orchestrator {
             }),
             Err(e) => {
                 tracing::error!(video_id, error = %e, "rustypipe fallback failed");
-                Err(ResolveError::AllClientsFailed(video_id.to_owned()))
+                // rustypipe is the last thing that spoke to YouTube, so its verdict counts as an
+                // answer even when every InnerTube client was skipped or errored (a disabled
+                // MAIN/VISIONOS pair, or TVHTML5_SIMPLY passed over for want of a PoToken). Without
+                // this, a genuinely dead video reads as an outage and the queue sits on it.
+                let reached = reached || e.answered();
+                Err(nothing_played(video_id, logged_in, login_wanted, reached))
             }
         }
     }
@@ -501,8 +599,21 @@ impl Orchestrator {
     /// at the player view with video on, it needs no cipher, no PoToken and no HEAD two-pass, and it
     /// must never be able to make audio slower or less reliable. A `None` here just means the view
     /// keeps the artwork.
-    pub async fn resolve_video(&self, video_id: &str, max_height: i32) -> Option<String> {
-        for key in ["VISIONOS", "ANDROID_VR_1_65_10"] {
+    pub async fn resolve_video(
+        &self,
+        video_id: &str,
+        max_height: i32,
+        disabled: &HashSet<String>,
+    ) -> Option<String> {
+        // VISIONOS alone: ANDROID_VR's video URLs are capped at the first mebibyte like its audio
+        // ones (issue #292), so it could only ever hand the view a stream that dies mid-clip.
+        for key in ["VISIONOS"] {
+            // The "stream clients" setting covers this path too. It used to be read only by
+            // `resolve`, so a user who turned a client off still got it here, which is both a
+            // setting that does not do what it says and a client they had a reason to refuse.
+            if disabled.contains(key) {
+                continue;
+            }
             let Some(client) = self.clients.get(key) else { continue };
             let resp = match self.it.player(client, video_id, None, None, None).await {
                 Ok(r) => r,
@@ -537,25 +648,54 @@ impl Orchestrator {
         self.cipher.deobfuscate_stream_url(cipher, video_id).await
     }
 
-    /// HEAD validation (context/06 §validateStatus). Success = 2xx. False on any error.
+    /// Will googlevideo serve this URL, all the way to the end? (context/06 §validateStatus.)
     ///
-    /// `headers` is what mpv will send for this stream, so the probe is the same request the
-    /// player will make. It used to always attach the cookie while `build` attached it only for
-    /// uploads, which let an ordinary track pass validation and then 403 on the real open.
-    async fn validate_head(&self, url: &str, headers: &HashMap<String, String>) -> bool {
-        // The 10s budget used to live on a client of its own; it is a property of this one
-        // probe, not of the app's HTTP.
-        let mut req = crate::http::client().head(url).timeout(Duration::from_secs(10));
+    /// Probe shape, not just probe headers. mpv never opens a googlevideo URL directly any more:
+    /// `state::mpv_stream_url` hands it a loopback URL and `audioproxy` fetches bounded ranges
+    /// upstream, so a bounded range is the request this has to predict.
+    ///
+    /// And the range is the last 256 bytes, because that is the one question that separates a
+    /// capped URL from a healthy one. Since 2026 googlevideo answers only the first mebibyte of
+    /// some URLs (rustypipe's, ANDROID_VR's): measured 2026-09-22, a range ending inside that
+    /// window returns 206 and every range ending past it returns 403, on every video tried and at
+    /// any chunk size. HEAD and an opening range both pass, and mpv was handed a stream that
+    /// delivered no bytes and blamed the audio format (issue #292). The unranged HEAD this replaced
+    /// also caught capped direct-client URLs, but only as an accident of what the CDN refused that
+    /// month (KNOWN-ISSUES KI-11/KI-12).
+    ///
+    /// `headers` is what `build` will hand mpv, so the probe carries exactly what the real fetch
+    /// will (issue #71). Falls back to a HEAD when there is no length to aim at: an RSS-feed
+    /// podcast's enclosure is not on googlevideo, reports `contentLength: "0"`, and may not honour
+    /// ranges at all (#294). Success = 2xx, false on any error.
+    async fn validate_stream(
+        &self,
+        url: &str,
+        headers: &HashMap<String, String>,
+        content_length: Option<u64>,
+    ) -> bool {
+        let req = match content_length.filter(|n| *n > 0).filter(|_| is_youtube_stream(url)) {
+            Some(len) => crate::http::client()
+                .get(url)
+                .header("Range", format!("bytes={}-{}", len.saturating_sub(256), len - 1))
+                .header("Accept-Encoding", "identity"),
+            None => crate::http::client().head(url),
+        };
+        // The 10s budget is a property of this one probe, not of the app's HTTP.
+        let mut req = req.timeout(Duration::from_secs(10));
         for (k, v) in headers {
             req = req.header(k, v);
         }
         matches!(req.send().await, Ok(r) if r.status().is_success())
     }
 
-    /// A cipher client's stream was refused → its config may be stale. Heal off the hot path so
+    /// A cipher client's stream was refused, so its config may be stale. Heal off the hot path so
     /// it never blocks falling through (context/06 §7). If the heal changes the config table,
     /// clear the WEB_REMIX failure memory (context/06 §2).
     fn self_heal(&self) {
+        if !claim_heal() {
+            tracing::debug!("self-heal ran recently, not repeating it");
+            return;
+        }
         let cipher = self.cipher.clone();
         let potoken = self.potoken.clone();
         let failed = self.web_remix_failed.clone();
@@ -572,8 +712,9 @@ impl Orchestrator {
         });
     }
 
-    /// [`stream_headers`] for a client registry key.
-    fn headers_for(&self, client: &str, is_upload: bool) -> HashMap<String, String> {
+    /// [`stream_headers`] for a client registry key. `pub(crate)` because a cache hit skips the
+    /// resolve and has to rebuild the same headers from the client it recorded.
+    pub(crate) fn headers_for(&self, client: &str, is_upload: bool) -> HashMap<String, String> {
         stream_headers(
             self.clients.get(client).map(|c| c.user_agent.clone()),
             self.it.cookie(),
@@ -614,11 +755,34 @@ impl Orchestrator {
     }
 }
 
+/// A format's byte length, when it reported one. `"0"` (an RSS-feed enclosure, #294) reads as
+/// absent, because a zero-length file has no tail to probe.
+fn content_length(f: &Format) -> Option<u64> {
+    f.content_length.as_deref()?.parse::<u64>().ok().filter(|n| *n > 0)
+}
+
+/// True for a URL served by YouTube's own stream CDN. Everything else (an RSS-feed podcast's
+/// enclosure, #294) gets no n-transform, no PoToken and no chunking proxy.
+///
+/// **Two hosts, not one.** Ordinary tracks come back on `*.googlevideo.com`, but one of the user's
+/// own uploads is served from `*.c.youtube.com` (measured on a 0.8.2 report, issue #308). Matching
+/// only the first host meant an upload's URL was handed to mpv unsigned: no `n`-transform and no
+/// `&pot=`, which googlevideo answers with 403, and mpv opened it directly because the chunking
+/// proxy skipped it too. Uploads have no anonymous client behind them, so that was every upload.
+pub(crate) fn is_youtube_stream(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.host_str().map(|h| h.ends_with(".googlevideo.com") || h.ends_with(".c.youtube.com"))
+        })
+        .unwrap_or(false)
+}
+
 /// The headers mpv (and the validating HEAD) must send for one stream.
 ///
-/// A privately-owned track's googlevideo URL is only served to the session that owns it, so an
-/// upload's GET has to carry the cookie. Uploads only: this is the hot path and there is no
-/// evidence an ordinary stream wants one. Issue #71.
+/// A privately-owned track's stream URL (`c.youtube.com`, #308) is only served to the session
+/// that owns it, so an upload's GET has to carry the cookie. Uploads only: this is the hot path
+/// and there is no evidence an ordinary stream wants one. Issue #71.
 ///
 /// mpv's header properties are global (crates/player: `http-header-fields`), so a track appended
 /// for gapless playback inherits whatever the current one set. Same host either way, so it is
@@ -638,6 +802,25 @@ fn stream_headers(
         }
     }
     headers
+}
+
+/// The error for a track nothing could stream. Signing in is a real fix when YouTube asked for an
+/// account and there is no session, and useless noise otherwise (issue #292).
+/// When no response came back at all (`reached` false), we never learned anything about this video.
+fn nothing_played(
+    video_id: &str,
+    logged_in: bool,
+    login_wanted: bool,
+    reached: bool,
+) -> ResolveError {
+    if !reached {
+        return ResolveError::Unreachable(video_id.to_owned());
+    }
+    if login_wanted && !logged_in {
+        ResolveError::SignInRequired(video_id.to_owned())
+    } else {
+        ResolveError::AllClientsFailed(video_id.to_owned())
+    }
 }
 
 fn is_high(f: &Format) -> bool {
@@ -690,9 +873,26 @@ fn best_thumbnail(resp: &PlayerResponse) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{blacklist_blocks, blacklist_insert, stream_headers, WEB_REMIX_BLACKLIST_TTL};
+    use super::{
+        blacklist_blocks, blacklist_insert, claim_heal, content_length, is_youtube_stream,
+        nothing_played, stream_headers, ResolveError, WEB_REMIX_BLACKLIST_TTL,
+    };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+
+    // An RSS-feed podcast streams from the feed's own host (#294), which gets no PoToken. One of
+    // the user's own uploads streams from `c.youtube.com` (#308), which needs everything a
+    // googlevideo URL needs: miss it and the URL reaches mpv unsigned and 403s.
+    #[test]
+    fn both_of_youtubes_stream_hosts_count_and_nothing_else_does() {
+        assert!(is_youtube_stream("https://rr5---sn-abc.googlevideo.com/videoplayback?n=x"));
+        assert!(is_youtube_stream("https://rr2---sn-2onja5-5i.c.youtube.com/videoplayback?n=x"));
+        assert!(!is_youtube_stream("https://www.podtrac.com/pts/redirect.mp3/x.mp3"));
+        assert!(!is_youtube_stream("https://evil.com/googlevideo.com/videoplayback"));
+        assert!(!is_youtube_stream("https://evil.com/rr2---sn-x.c.youtube.com/videoplayback"));
+        assert!(!is_youtube_stream("https://www.youtube.com/watch?v=x"));
+        assert!(!is_youtube_stream("/home/me/song.flac"));
+    }
 
     #[test]
     fn the_web_remix_bar_expires_and_stays_bounded() {
@@ -730,5 +930,87 @@ mod tests {
 
         // Signed out: an upload cannot play at all, but it must not produce a bogus header.
         assert!(!stream_headers(ua(), None, true).contains_key("Cookie"));
+    }
+
+    /// Silence outranks a half-heard verdict: with nothing reached, even a `LOGIN_REQUIRED` seen
+    /// earlier must not turn an outage into "sign in".
+    #[test]
+    fn nothing_played_prefers_unreachable_over_a_verdict() {
+        for (logged_in, login_wanted) in
+            [(false, true), (false, false), (true, true), (true, false)]
+        {
+            assert!(
+                matches!(
+                    nothing_played("v", logged_in, login_wanted, false),
+                    ResolveError::Unreachable(_)
+                ),
+                "an outage must never read as a verdict on the track"
+            );
+        }
+    }
+
+    /// The regression guard for issue #292's fix, once YouTube did answer.
+    #[test]
+    fn nothing_played_keeps_its_old_answers_when_youtube_answered() {
+        assert!(matches!(nothing_played("v", false, true, true), ResolveError::SignInRequired(_)));
+        for (logged_in, login_wanted) in [(false, false), (true, true), (true, false)] {
+            assert!(matches!(
+                nothing_played("v", logged_in, login_wanted, true),
+                ResolveError::AllClientsFailed(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn only_the_systemic_errors_affect_every_track() {
+        let v = || "v".to_owned();
+        assert!(
+            ResolveError::Unreachable(v()).affects_every_track(),
+            "an outage would walk the queue and delete rows"
+        );
+        assert!(
+            ResolveError::SignInRequired(v()).affects_every_track(),
+            "every anonymous track fails the same way until the user signs in"
+        );
+        assert!(
+            !ResolveError::AllClientsFailed(v()).affects_every_track(),
+            "an unavailable video must still be skipped, or the queue stalls on it"
+        );
+        assert!(
+            !ResolveError::UploadUnavailable(v()).affects_every_track(),
+            "a mixed queue must skip past a failed upload to the ordinary tracks"
+        );
+        assert!(
+            !ResolveError::LocalMissing(v()).affects_every_track(),
+            "a deleted local file must keep leaving the queue"
+        );
+    }
+
+    #[test]
+    fn content_length_reads_only_a_real_length() {
+        let fmt = |len: &str| -> super::Format {
+            let mut v = serde_json::json!({ "itag": 251, "mimeType": "audio/webm" });
+            if !len.is_empty() {
+                v["contentLength"] = len.into();
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        assert_eq!(content_length(&fmt("4194304")), Some(4194304));
+        assert_eq!(
+            content_length(&fmt("0")),
+            None,
+            "a zero-length enclosure has no tail to probe, so it must fall back to the HEAD"
+        );
+        assert_eq!(content_length(&fmt("")), None);
+        assert_eq!(content_length(&fmt("not a number")), None);
+    }
+
+    #[test]
+    fn claim_heal_allows_one_and_then_holds_the_door() {
+        assert!(claim_heal());
+        assert!(
+            !claim_heal(),
+            "a burst of identical probe failures must cost one heal, not one heal per track"
+        );
     }
 }

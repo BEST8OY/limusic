@@ -271,15 +271,12 @@
 			"stream_clients_hint": ""
 		},
 		"themes": {
-			"accent_themes": "",
 			"interface_font": "",
 			"load_font_file": "",
 			"custom_colors": "",
 			"primary_color": "",
 			"background_color": "",
 			"reset_theme": "",
-			"accent_colors": "",
-			"palettes": "",
 			"your_fonts": "",
 			"custom_font": "",
 			"font_placeholder": "",

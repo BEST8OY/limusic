@@ -29,21 +29,29 @@
 	import * as api from '$lib/api';
 	import type { SongItem } from '$lib/api';
 	import { anchorMenu, ctxHost, fitMenu, NO_ANCHOR, toBody } from '$lib/menu';
+	import { removableFromPlaylist } from '$lib/queue';
 	import {
 		addPick,
 		blockArtist,
+		bumpLibraryTrackCount,
 		enqueue,
 		inSongLibrary,
 		songLibraryToken,
 		openShare,
+		notePlaylistRemove,
+		noteUnsavedFrom,
 		personal,
+		playback,
 		ratingOf,
 		removePick,
+		savedIn,
+		toast,
 		startRadio,
 		toggleRating,
 		toggleSongLibrary
 	} from '$lib/player.svelte';
 	import { t } from '$lib/i18n.svelte';
+	import { invalidateCachedPrefix } from '$lib/pagecache';
 	import TempoPitchDialog from './TempoPitchDialog.svelte';
 
 	let {
@@ -52,6 +60,8 @@
 		onAdd,
 		onRemove,
 		removeLabel = t('player.remove_from_playlist'),
+		playlistId,
+		queueIndex,
 		linksOnly = false,
 		inLibraryList = false
 	}: {
@@ -63,6 +73,17 @@
 		/** Adds a remove menu item (label via `removeLabel`). */
 		onRemove?: () => void;
 		removeLabel?: string;
+		/**
+		 * The playlist this row is *playing from* (the queue's `sourceId`), which gets the row its
+		 * own "Remove from this playlist" on top of whatever `onRemove` the host already spends on
+		 * its own list. Only the player surfaces pass it: everywhere else the list on screen is the
+		 * playlist, and `onRemove` is already that.
+		 */
+		playlistId?: string | null;
+		/** This row's index in the backend queue, where the row *is* a queue row (the queue panel,
+		    the player bar). Lets the playlist removal take the row out of the queue that came from
+		    that playlist, rather than leaving a song the playlist no longer has queued up. */
+		queueIndex?: number;
 		/** Player-bar variant: ⋮ trigger, and only artist/album/shortcuts (queue and like already
 		    have their own buttons there). */
 		linksOnly?: boolean;
@@ -112,12 +133,51 @@
 	// builds itself (local files, On Repeat, a mirrored guest queue) rather than dead.
 	const inLib = $derived(inSongLibrary(song));
 	const libraryToken = $derived(songLibraryToken(song));
-	// A local file has no YouTube identity: liking it or putting it in a YTM playlist is not a
-	// thing, so those items don't show. Queue, shortcuts and go-to-album work normally.
+	// A local file has no YouTube identity: liking it or sharing it is not a thing, so those items
+	// don't show. Queue, shortcuts, go-to-album and saving it to a playlist on this machine work.
 	const isLocal = $derived(api.isLocalId(song.video_id));
+	// "Remove from this playlist", for a row playing out of a playlist (issue #270). What the three
+	// conditions are and why is in `removableFromPlaylist` (queue.ts), where they are checkable.
+	const removable = $derived(removableFromPlaylist(song, playlistId, savedIn.map));
+
+	async function removeFromPlaylist() {
+		if (!playlistId || !song.set_video_id) return;
+		const setVideoId = song.set_video_id;
+		try {
+			await api.removeFromPlaylist(playlistId, song.video_id, setVideoId);
+		} catch (e) {
+			toast.error(String(e));
+			return; // nothing below happens on a failed write: the row is still in the playlist
+		}
+		bumpLibraryTrackCount(playlistId, -1);
+		noteUnsavedFrom(playlistId, song.video_id);
+		// An open page for this playlist drops the row now; the cache drop covers every other one,
+		// which has no rendered list to patch.
+		notePlaylistRemove(playlistId, setVideoId);
+		// Every order the page cached this playlist in, not just the bare key: a sort the user
+		// picked earlier still holds the row, and the playlist page serves that hit as it is.
+		invalidateCachedPrefix(`playlist:${playlistId}`);
+		toast.success(t('toasts.removed_from_playlist'));
+		// The song is out of the playlist, so it does not stay in the queue that playlist filled.
+		// The playing row can't just be dropped (`remove_from_queue` refuses the current index, and
+		// the user would keep listening to a track they just threw out), so skip past it first:
+		// that leaves it behind the pointer, where removing it shifts `current` back onto the song
+		// now playing.
+		if (queueIndex === undefined) return;
+		// Resolved again rather than reused: the index this menu opened on is a position, and a
+		// queue edit during the request above (a guest add, another removal) moves every row
+		// behind it. The setVideoId identifies the row itself.
+		const at = playback.queue.items.findIndex((r) => r.set_video_id === setVideoId);
+		if (at < 0) return; // already gone from the queue
+		if (at === playback.queue.currentIndex) await api.nextTrack();
+		await api.removeFromQueue(at);
+	}
 </script>
 
+<!-- type="button": SearchSuggest keeps a hidden trigger inside the search <form>, and a default
+     submit button there is what Enter clicks, opening this menu at the top left (#334). -->
 <button
+	type="button"
 	class="{triggerClass} {menuOpen ? 'opacity-100' : ''}"
 	onclick={openMenu}
 	aria-label={t('a11y.track_options')}
@@ -300,7 +360,7 @@
 		{/if}
 		<!-- Always here, including the player bar at full width where the + button is right there:
 		     people look for this in the menu and miss the icon. -->
-		{#if onAdd && !isLocal}
+		{#if onAdd}
 			<button
 				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
 				onclick={(e) => run(e, onAdd)}
@@ -314,6 +374,15 @@
 				onclick={(e) => run(e, onRemove)}
 			>
 				<HugeiconsIcon icon={PlayListRemoveIcon} class="h-4 w-4" /> {removeLabel}
+			</button>
+		{/if}
+		{#if removable}
+			<button
+				class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-destructive hover:bg-destructive/10"
+				onclick={(e) => run(e, removeFromPlaylist)}
+			>
+				<HugeiconsIcon icon={PlayListRemoveIcon} class="h-4 w-4" />
+				{t('player.remove_from_this_playlist')}
 			</button>
 		{/if}
 	</div>

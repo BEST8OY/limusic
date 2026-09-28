@@ -18,7 +18,7 @@ pub use clients::{
     STREAM_FALLBACK_ORDER, UPLOAD_FALLBACK_ORDER,
 };
 pub use models::browse::{
-    AlbumPage, ArtistCarousel, ArtistPage, BrowseItem, HistoryGroup, HomePage,
+    AlbumPage, ArtistCarousel, ArtistPage, BrowseItem, HistoryGroup, HomePage, Mood, MoodSection,
     PlaylistContinuation, PlaylistPage, PlaylistSort, SearchResults, Section, SortMenu,
 };
 pub use models::context::Locale;
@@ -41,7 +41,7 @@ pub use strategy::{
 pub use transport::{
     cookie_sapisid, generate_cpn, inject_pref_cookie, parse_homepage_visitor_data,
     parse_visitor_data, resolve_route, sapisid_hash, validated_media_url, validated_stats_url,
-    validated_upload_url, EndpointRoute, Error, InnerTube, Session, API_BASE_MUSIC,
-    API_BASE_STUDIO, API_BASE_WWW, BASE_URL, ORIGIN, ORIGIN_MUSIC, ORIGIN_STUDIO, ORIGIN_WWW,
-    REFERER, SW_JS_DATA_URL,
+    validated_upload_url, without_healing, EndpointRoute, Error, Healing, InnerTube, Session,
+    API_BASE_MUSIC, API_BASE_STUDIO, API_BASE_WWW, BASE_URL, ORIGIN, ORIGIN_MUSIC, ORIGIN_STUDIO,
+    ORIGIN_WWW, REFERER, SW_JS_DATA_URL,
 };

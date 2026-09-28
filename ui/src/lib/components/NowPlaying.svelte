@@ -43,6 +43,21 @@
 	// it back. beforeNavigate (not a pathname effect) so clicking the tab you're already on counts.
 	beforeNavigate(() => (np.open = false));
 
+	// Clicking the empty space around the artwork closes the view (#302), the way a dialog's
+	// backdrop does. `data-np-keep` marks the two regions that own their clicks: the artwork itself
+	// and the queue/lyrics column. Anything added straight to the view outside those closes it.
+	// Same press-not-release rule as the player bar: dragging a queue row (or a lyrics scroll) and
+	// releasing over the backdrop retargets the click at the common ancestor, which is this. Both
+	// ends of the drag are checked, because the retarget happens whichever way it ran: a selection
+	// started on the backdrop and finished over the lyrics lands the click here too.
+	const keeps = (t: EventTarget | null) => !!(t as Element | null)?.closest?.('[data-np-keep]');
+	let pressedKeep = false;
+	let releasedKeep = false;
+	function onBackdropClick(e: MouseEvent) {
+		if (pressedKeep || releasedKeep || keeps(e.target)) return;
+		np.open = false;
+	}
+
 	// Enlarged lyrics take the whole view, artwork column and tab strip included. A class swap
 	// rather than unmounting the tabs: LyricsView must survive it or it refetches and loses its
 	// scroll position.
@@ -98,8 +113,14 @@
      The player bar and the queue/lyrics panels come later/higher, so they still paint above.
      ponytail: left offsets mirror Sidebar's w-16/lg:w-60 (and its manual collapse) — keep in sync
      if those change. -->
+<!-- The player bar's chevron (and E) is the keyboard equivalent of clicking the backdrop, so this
+     stays a plain region rather than a control wrapping the whole view. -->
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div
 	transition:fly={{ y: '100%', duration: 320, easing: cubicOut }}
+	onpointerdown={(e) => ((pressedKeep = keeps(e.target)), (releasedKeep = false))}
+	onpointerup={(e) => (releasedKeep = keeps(e.target))}
+	onclick={onBackdropClick}
 	class="absolute inset-y-0 left-16 right-0 z-20 flex justify-center overflow-hidden bg-background px-4 py-4 sm:px-6 sm:py-6 lg:px-10 {ui.sidebarCollapsed
 		? ''
 		: 'lg:left-60'} {inset}"
@@ -157,6 +178,7 @@
 				<div
 					class="relative w-full {showVideo() ? 'max-w-[var(--vid)]' : 'max-w-[var(--art)]'}"
 					onwheel={onWheel}
+					data-np-keep
 				>
 					{#if volFlash}
 						<!-- Middle left of the artwork, on a plate: it sits over whatever the picture is,
@@ -178,7 +200,8 @@
 									style="height:{playback.volume}%"
 								></div>
 							</div>
-							<span class="text-[10px] tabular-nums">{playback.volume}</span>
+							<!-- Three digits wide at every level, or the plate grows a few px at 100 (#336). -->
+							<span class="w-[3ch] text-center text-[10px] tabular-nums">{playback.volume}</span>
 						</div>
 					{/if}
 					<button
@@ -262,7 +285,10 @@
 		{/if}
 
 		{#if tabbed}
-			<div class="flex min-h-0 flex-col {big ? 'flex-1' : 'w-full md:w-[22rem] xl:w-[26rem]'}">
+			<div
+				class="flex min-h-0 flex-col {big ? 'flex-1' : 'w-full md:w-[22rem] xl:w-[26rem]'}"
+				data-np-keep
+			>
 				<Tabs.Root
 					value={np.tab}
 					onValueChange={(v) => (np.tab = v as typeof np.tab)}

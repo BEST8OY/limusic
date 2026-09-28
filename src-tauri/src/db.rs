@@ -6,6 +6,12 @@ use std::sync::Mutex;
 use md5::{Digest, Md5};
 use rusqlite::Connection;
 
+/// Clearing the lyrics cache spares songs whose source was picked by hand in the lyrics footer (or
+/// their timing nudged): those are the user's choices, not a cache.
+// ponytail: the pin lives in the lyrics JSON rather than a column, it is read nowhere else.
+const CLEAR_LYRICS: &str =
+    "DELETE FROM lyrics_cache WHERE lyrics IS NULL OR json_extract(lyrics, '$.pinned') IS NOT 1";
+
 pub struct Db(Mutex<Connection>);
 
 /// The stored-account key (multi-account support): a stable per-Google-account identifier derived
@@ -66,9 +72,73 @@ pub struct CachedStream {
     /// lookahead caches the next track and a non-gapless advance then re-resolves it. Issue #83.
     pub ping_url: Option<String>,
     pub ping_client: Option<String>,
+    /// The client whose URL this is ("WEB_REMIX", "VISIONOS", ...), so a replay can rebuild the
+    /// headers the URL was validated under (the User-Agent is per client; the wrong one is a 403)
+    /// and a failure toast can name it. `ping_client` is not a substitute: the orchestrator prefers
+    /// the *main* client's tracking block even when a fallback won the stream.
+    pub client: Option<String>,
 }
 
 impl Db {
+    /// [`Db::open`], but a database that cannot be opened is moved aside and a fresh one is
+    /// created in its place.
+    ///
+    /// The file holds a cache plus a little UI state (queue, settings, play counts), and the
+    /// playlists kept on this machine. Losing it costs the user their resume position, their On
+    /// Repeat history and those playlists (still in the moved-aside copy). Failing to open it costs
+    /// them the whole app: `open` is called from Tauri's `setup`, before any window exists, so a
+    /// hard failure there is a process that starts and vanishes with nothing on screen. Between
+    /// those two, starting is worth more.
+    ///
+    /// The bad file is kept, never deleted, so a user who cares can be walked through recovering
+    /// rows from it. The name carries a timestamp so a repeated failure does not overwrite the
+    /// first (and most likely useful) copy.
+    ///
+    /// Only SQLite's own verdict that the file is damaged (`NotADatabase`, `DatabaseCorrupt`) moves
+    /// it. Anything else (locked, permissions, a missing directory) says nothing about the data,
+    /// and moving a healthy library aside for it would hand the user an empty one for nothing, so
+    /// that error is returned as is.
+    ///
+    /// Returns the error from the *second* attempt if even a fresh file will not open, because at
+    /// that point the problem is the directory or the disk, not the data.
+    pub fn open_or_quarantine(
+        path: &std::path::Path,
+    ) -> rusqlite::Result<(Self, Option<std::path::PathBuf>)> {
+        use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+        match Self::open(path) {
+            Ok(db) => Ok((db, None)),
+            Err(first)
+                if !matches!(first.sqlite_error_code(), Some(NotADatabase | DatabaseCorrupt)) =>
+            {
+                Err(first)
+            }
+            Err(first) => {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let aside = path.with_extension(format!("corrupt-{stamp}.sqlite"));
+                tracing::error!(
+                    "cannot open {}: {first}. Moving it to {}",
+                    path.display(),
+                    aside.display()
+                );
+                // WAL leaves -wal and -shm beside the database. Move them too, or the fresh file
+                // inherits a journal that does not belong to it. Suffixed on the OsStr, not via
+                // `display()`, which is lossy on a non-UTF-8 path and would rename nothing.
+                for suffix in ["", "-wal", "-shm"] {
+                    let with = |p: &std::path::Path| {
+                        let mut s = p.as_os_str().to_owned();
+                        s.push(suffix);
+                        std::path::PathBuf::from(s)
+                    };
+                    let _ = std::fs::rename(with(path), with(&aside));
+                }
+                Self::open(path).map(|db| (db, Some(aside)))
+            }
+        }
+    }
+
     pub fn open(path: &std::path::Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         // This file is a cache plus a little UI state, and it is written on every volume nudge,
@@ -117,7 +187,8 @@ impl Db {
                 track_no      INTEGER NOT NULL,
                 duration_secs INTEGER NOT NULL,
                 cover         TEXT,
-                mtime         INTEGER NOT NULL
+                mtime         INTEGER NOT NULL,
+                disc_no       INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS local_tracks_album ON local_tracks(album_key);
             CREATE TABLE IF NOT EXISTS playlist_track (
@@ -135,6 +206,31 @@ impl Db {
                 visitor_data           TEXT,
                 added_at               INTEGER NOT NULL
             );
+            -- Playlists kept on this machine, no account needed (issue #251). Unlike everything
+            -- above except `accounts`, this is the user's own data and not a cache: nothing
+            -- rebuilds it. AUTOINCREMENT on both so an id is never handed out twice: a shortcut,
+            -- a pin or an open page left pointing at a deleted playlist (or a removed row) must
+            -- not quietly land on whatever took its number.
+            CREATE TABLE IF NOT EXISTS local_playlists (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                title       TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at  INTEGER NOT NULL,
+                updated_at  INTEGER NOT NULL
+            );
+            -- One row per track, in the order added (`id`). The row id is the track's
+            -- `set_video_id`, the same handle a YouTube playlist row carries for its removal.
+            -- `song_json` is the whole `SongItem`, so the playlist opens with no network at all.
+            CREATE TABLE IF NOT EXISTS local_playlist_tracks (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                playlist_id INTEGER NOT NULL,
+                video_id    TEXT NOT NULL,
+                song_json   TEXT NOT NULL,
+                added_at    INTEGER NOT NULL,
+                UNIQUE (playlist_id, video_id)
+            );
+            CREATE INDEX IF NOT EXISTS local_playlist_tracks_video
+                ON local_playlist_tracks(video_id);
             "#,
         )?;
         // Migrate pre-Phase-4 DBs that predate the loudness_db column. Errors ("duplicate column")
@@ -143,6 +239,9 @@ impl Db {
         // Same for the AlbumArtist tag, which older scans read but never stored. The SCAN_VERSION
         // bump in local.rs is what refills it; this only makes the column exist.
         let _ = conn.execute("ALTER TABLE local_tracks ADD COLUMN album_artist TEXT", []);
+        // And the disc number (issue #315), refilled the same way.
+        let _ = conn
+            .execute("ALTER TABLE local_tracks ADD COLUMN disc_no INTEGER NOT NULL DEFAULT 0", []);
         // Same one-shot for the music-video verdict, except the rows that predate it have to go:
         // a cache hit skips `/player`, so a NULL there reads as "no music video" for as long as
         // the URL lives (hours). `execute` succeeds only on the launch that adds the column, so
@@ -154,6 +253,11 @@ impl Db {
         // means that one replay goes unregistered, which is exactly what every row did before.
         let _ = conn.execute("ALTER TABLE stream_url_cache ADD COLUMN ping_url TEXT", []);
         let _ = conn.execute("ALTER TABLE stream_url_cache ADD COLUMN ping_client TEXT", []);
+        // The resolving client, so a replay can rebuild its headers and name itself. Rows that
+        // predate it have neither, which is the bug, so wipe them once like `is_video` above.
+        if conn.execute("ALTER TABLE stream_url_cache ADD COLUMN client TEXT", []).is_ok() {
+            let _ = conn.execute("DELETE FROM stream_url_cache", []);
+        }
         // Local files are no longer recorded as plays (see `AppState::on_position`), but 0.3.1
         // recorded them for a while, so clear out anything already sitting in On Repeat's table.
         let _ = conn.execute("DELETE FROM plays WHERE video_id LIKE 'LOCAL:%'", []);
@@ -162,6 +266,31 @@ impl Db {
         // built up before anything pruned at all (1803 rows, 1772 of them expired, on a real
         // install) would sit there until it happened to.
         let _ = conn.execute("DELETE FROM stream_url_cache WHERE expires_at <= ?1", [now_secs()]);
+        // #329 put LRCLIB's search ahead of Netease, QQ and Kugou, but cached hits never expire, so
+        // every track they already answered would keep their lyrics. Drop those once; the next
+        // play asks the chain again. `user_version` is the once-marker, unused before this.
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+        if version < 1 {
+            let _ = conn.execute(
+                "DELETE FROM lyrics_cache WHERE json_extract(lyrics, '$.source')
+                    IN ('Netease Cloud Music', 'QQ Music', 'Kugou')",
+                [],
+            );
+            let _ = conn.execute_batch("PRAGMA user_version = 1");
+        }
+        // v1.0.0: the Boidu switch became one entry in an ordered provider list, and word-timed
+        // providers joined the head of it. Boidu turned off carries over as `-boidu`. Cached hits
+        // never expire, so without a purge no song already played would ever reach the new ones.
+        if version < 2 {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO settings(key, value) SELECT 'lyrics_providers', '-boidu'
+                    FROM settings WHERE key = 'lyrics_boidu' AND value = 'false'",
+                [],
+            );
+            let _ = conn.execute("DELETE FROM settings WHERE key = 'lyrics_boidu'", []);
+            let _ = conn.execute("DELETE FROM lyrics_cache", []);
+            let _ = conn.execute_batch("PRAGMA user_version = 2");
+        }
         // One-time migration of the pre-multi-account single session into `accounts`. The legacy
         // settings rows stay in place as projections of the active account (see `StoredAccount`).
         let legacy_cookie = conn
@@ -513,7 +642,7 @@ impl Db {
     pub fn get_stream(&self, video_id: &str, now: i64) -> Option<CachedStream> {
         let conn = self.0.lock().unwrap();
         conn.query_row(
-            "SELECT url, itag, expires_at, loudness_db, is_video, ping_url, ping_client FROM stream_url_cache WHERE video_id = ?1 AND expires_at > ?2",
+            "SELECT url, itag, expires_at, loudness_db, is_video, ping_url, ping_client, client FROM stream_url_cache WHERE video_id = ?1 AND expires_at > ?2",
             rusqlite::params![video_id, now],
             |r| {
                 Ok(CachedStream {
@@ -524,6 +653,7 @@ impl Db {
                     is_video: r.get(4)?,
                     ping_url: r.get(5)?,
                     ping_client: r.get(6)?,
+                    client: r.get(7)?,
                 })
             },
         )
@@ -545,8 +675,8 @@ impl Db {
     pub fn put_stream(&self, video_id: &str, row: &CachedStream, now: i64) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute(
-            "INSERT INTO stream_url_cache(video_id, url, itag, expires_at, loudness_db, is_video, ping_url, ping_client) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(video_id) DO UPDATE SET url = excluded.url, itag = excluded.itag, expires_at = excluded.expires_at, loudness_db = excluded.loudness_db, is_video = excluded.is_video, ping_url = excluded.ping_url, ping_client = excluded.ping_client",
+            "INSERT INTO stream_url_cache(video_id, url, itag, expires_at, loudness_db, is_video, ping_url, ping_client, client) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(video_id) DO UPDATE SET url = excluded.url, itag = excluded.itag, expires_at = excluded.expires_at, loudness_db = excluded.loudness_db, is_video = excluded.is_video, ping_url = excluded.ping_url, ping_client = excluded.ping_client, client = excluded.client",
             rusqlite::params![
                 video_id,
                 row.url,
@@ -555,7 +685,8 @@ impl Db {
                 row.loudness_db,
                 row.is_video,
                 row.ping_url,
-                row.ping_client
+                row.ping_client,
+                row.client
             ],
         );
         let _ = conn.execute("DELETE FROM stream_url_cache WHERE expires_at <= ?1", [now]);
@@ -565,7 +696,7 @@ impl Db {
     pub fn clear_stream_cache(&self) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute("DELETE FROM stream_url_cache", []);
-        let _ = conn.execute("DELETE FROM lyrics_cache", []);
+        let _ = conn.execute(CLEAR_LYRICS, []);
     }
 
     /// Drop cached lyrics only, leaving stream URLs alone. Changing which providers are allowed
@@ -573,7 +704,13 @@ impl Db {
     /// on every track whose lyrics were already fetched (cache hits never expire).
     pub fn clear_lyrics_cache(&self) {
         let conn = self.0.lock().unwrap();
-        let _ = conn.execute("DELETE FROM lyrics_cache", []);
+        let _ = conn.execute(CLEAR_LYRICS, []);
+    }
+
+    /// Forget one song's lyrics, a hand-picked source included.
+    pub fn delete_lyrics(&self, video_id: &str) {
+        let conn = self.0.lock().unwrap();
+        let _ = conn.execute("DELETE FROM lyrics_cache WHERE video_id = ?1", [video_id]);
     }
 
     // --- lyrics cache -----------------------------------------------------------------------
@@ -716,14 +853,21 @@ impl Db {
         );
     }
 
-    /// videoId → the playlists holding it. ponytail: the whole table in one go, like
-    /// `local_tracks`, since an owned-playlist library is thousands of rows and the UI needs random
-    /// access to it on every row it draws.
+    /// videoId → the playlists holding it, the ones on this machine included (as their
+    /// `LOCALPLAYLIST:` browseIds), so the saved mark and "Remove from this playlist" treat both
+    /// kinds alike. ponytail: the whole table in one go, like `local_tracks`, since an
+    /// owned-playlist library is thousands of rows and the UI needs random access to it on every
+    /// row it draws.
     pub fn playlist_memberships(&self) -> std::collections::HashMap<String, Vec<String>> {
         let conn = self.0.lock().unwrap();
         let mut out: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
-        if let Ok(mut stmt) = conn.prepare("SELECT video_id, playlist_id FROM playlist_track") {
+        let sql = format!(
+            "SELECT video_id, playlist_id FROM playlist_track UNION ALL \
+             SELECT video_id, '{}' || playlist_id FROM local_playlist_tracks",
+            crate::state::LOCAL_PLAYLIST_PREFIX
+        );
+        if let Ok(mut stmt) = conn.prepare(&sql) {
             if let Ok(rows) =
                 stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             {
@@ -735,10 +879,163 @@ impl Db {
         out
     }
 
-    /// The index is per-account, so signing out or switching channel empties it.
+    /// The index is per-account, so signing out or switching channel empties it. The playlists on
+    /// this machine belong to no account and are not in that table.
     pub fn clear_playlist_index(&self) {
         let conn = self.0.lock().unwrap();
         let _ = conn.execute("DELETE FROM playlist_track", []);
+    }
+
+    // --- playlists on this machine (issue #251) -----------------------------------------------
+    // The user's own data, so unlike the cache writes above every write here answers whether it
+    // happened: a playlist edit that silently did nothing is a lost edit.
+
+    pub fn create_local_playlist(&self, title: &str, now: i64) -> rusqlite::Result<i64> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO local_playlists(title, created_at, updated_at) VALUES(?1, ?2, ?2)",
+            rusqlite::params![title, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Every playlist, the most recently changed first (YouTube's own library order).
+    pub fn local_playlists(&self) -> Vec<LocalPlaylist> {
+        self.query_local_playlists(None)
+    }
+
+    pub fn local_playlist(&self, id: i64) -> Option<LocalPlaylist> {
+        self.query_local_playlists(Some(id)).pop()
+    }
+
+    fn query_local_playlists(&self, id: Option<i64>) -> Vec<LocalPlaylist> {
+        let conn = self.0.lock().unwrap();
+        let sql = format!(
+            "SELECT p.id, p.title, p.description,
+                    (SELECT COUNT(*) FROM local_playlist_tracks t WHERE t.playlist_id = p.id),
+                    (SELECT song_json FROM local_playlist_tracks t WHERE t.playlist_id = p.id
+                     ORDER BY t.id LIMIT 1)
+             FROM local_playlists p {}
+             ORDER BY p.updated_at DESC, p.id DESC",
+            if id.is_some() { "WHERE p.id = ?1" } else { "" }
+        );
+        let row = |r: &rusqlite::Row| {
+            Ok(LocalPlaylist {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                description: r.get(2)?,
+                count: r.get(3)?,
+                first_song: r.get(4)?,
+            })
+        };
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            let rows = match id {
+                Some(id) => stmt.query_map([id], row),
+                None => stmt.query_map([], row),
+            };
+            if let Ok(rows) = rows {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// One playlist's tracks in the order they were added, as `(row id, song_json)`.
+    pub fn local_playlist_tracks(&self, id: i64) -> Vec<(i64, String)> {
+        let conn = self.0.lock().unwrap();
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, song_json FROM local_playlist_tracks WHERE playlist_id = ?1 ORDER BY id",
+        ) {
+            if let Ok(rows) = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?))) {
+                out.extend(rows.flatten());
+            }
+        }
+        out
+    }
+
+    /// Append `(video_id, song_json)` rows, answering per row whether it went in: `false` is a
+    /// track the playlist already holds, which is refused the way YouTube refuses one. One
+    /// transaction, so a bulk add of a whole album is one fsync and lands all or nothing.
+    pub fn add_local_playlist_tracks(
+        &self,
+        id: i64,
+        songs: &[(String, String)],
+        now: i64,
+    ) -> rusqlite::Result<Vec<bool>> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let exists: bool =
+            tx.query_row("SELECT COUNT(*) FROM local_playlists WHERE id = ?1", [id], |r| {
+                r.get::<_, i64>(0).map(|n| n > 0)
+            })?;
+        if !exists {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let mut added = Vec::with_capacity(songs.len());
+        for (video_id, json) in songs {
+            let n = tx.execute(
+                "INSERT OR IGNORE INTO local_playlist_tracks(playlist_id, video_id, song_json, \
+                 added_at) VALUES(?1, ?2, ?3, ?4)",
+                rusqlite::params![id, video_id, json, now],
+            )?;
+            added.push(n > 0);
+        }
+        if added.contains(&true) {
+            tx.execute("UPDATE local_playlists SET updated_at = ?1 WHERE id = ?2", [now, id])?;
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// Drop rows by their row id. Scoped to the playlist, so a stale id from another list can
+    /// never take out someone else's row.
+    pub fn remove_local_playlist_tracks(
+        &self,
+        id: i64,
+        rows: &[i64],
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        for row in rows {
+            tx.execute(
+                "DELETE FROM local_playlist_tracks WHERE playlist_id = ?1 AND id = ?2",
+                [id, *row],
+            )?;
+        }
+        tx.execute("UPDATE local_playlists SET updated_at = ?1 WHERE id = ?2", [now, id])?;
+        tx.commit()
+    }
+
+    /// Rename and/or re-describe. `None` leaves that field as it is. Errors when there is no such
+    /// playlist, rather than reporting an edit nothing received.
+    pub fn edit_local_playlist(
+        &self,
+        id: i64,
+        title: Option<&str>,
+        description: Option<&str>,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.0.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE local_playlists SET title = COALESCE(?1, title),
+                 description = COALESCE(?2, description), updated_at = ?3 WHERE id = ?4",
+            rusqlite::params![title, description, now, id],
+        )?;
+        if n == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    pub fn delete_local_playlist(&self, id: i64) -> rusqlite::Result<()> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM local_playlist_tracks WHERE playlist_id = ?1", [id])?;
+        tx.execute("DELETE FROM local_playlists WHERE id = ?1", [id])?;
+        tx.commit()
     }
 
     // --- local music library (local.rs) -------------------------------------------------------
@@ -776,7 +1073,8 @@ impl Db {
                     t.track_no,
                     t.duration_secs,
                     t.cover,
-                    t.mtime
+                    t.mtime,
+                    t.disc_no
                 ],
             );
         }
@@ -801,8 +1099,8 @@ impl Db {
     pub fn local_tracks(&self, album_key: Option<&str>) -> Vec<LocalTrack> {
         let conn = self.0.lock().unwrap();
         let sql =
-            "SELECT path, title, artist, album, album_key, album_artist, track_no, duration_secs, cover, mtime
-                   FROM local_tracks {WHERE} ORDER BY album, track_no, title";
+            "SELECT path, title, artist, album, album_key, album_artist, track_no, duration_secs, cover, mtime, disc_no
+                   FROM local_tracks {WHERE}";
         let sql =
             sql.replace("{WHERE}", if album_key.is_some() { "WHERE album_key = ?1" } else { "" });
         let mut out = Vec::new();
@@ -818,6 +1116,7 @@ impl Db {
                 duration_secs: r.get(7)?,
                 cover: r.get(8)?,
                 mtime: r.get(9)?,
+                disc_no: r.get(10)?,
             })
         };
         if let Ok(mut stmt) = conn.prepare(&sql) {
@@ -829,17 +1128,38 @@ impl Db {
                 out.extend(rows.flatten());
             }
         }
+        // Disc before track, since every disc numbers from 1 (issue #315). The folder sits between
+        // them for a rip with no disc tag: CD1/ and CD2/ keep their tracks apart instead of
+        // interleaving them. It changes nothing for an album that lives in one folder.
+        //
+        // The album itself goes right after the title, or two albums sharing one ("Greatest Hits")
+        // are dealt out a disc at a time. With no album artist the key is the folder's digest
+        // (`local::tagged_album_key`), so the folder stands in for it there: it sorts by name,
+        // which keeps an untagged CD1/ ahead of CD2/.
+        fn order(
+            t: &LocalTrack,
+        ) -> (&str, &str, Option<&std::path::Path>, i64, Option<&std::path::Path>, i64, &str)
+        {
+            let dir = std::path::Path::new(&t.path).parent();
+            let (key, key_dir) = match t.album_artist {
+                Some(_) => (t.album_key.as_str(), None),
+                None => ("", dir),
+            };
+            (&t.album, key, key_dir, t.disc_no, dir, t.track_no, &t.title)
+        }
+        out.sort_by(|a, b| order(a).cmp(&order(b)));
         out
     }
 }
 
 const LOCAL_TRACK_UPSERT: &str =
-    "INSERT INTO local_tracks(path, title, artist, album, album_key, album_artist, track_no, duration_secs, cover, mtime)
-     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+    "INSERT INTO local_tracks(path, title, artist, album, album_key, album_artist, track_no, duration_secs, cover, mtime, disc_no)
+     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
      ON CONFLICT(path) DO UPDATE SET title = excluded.title, artist = excluded.artist,
         album = excluded.album, album_key = excluded.album_key,
         album_artist = excluded.album_artist, track_no = excluded.track_no,
-        duration_secs = excluded.duration_secs, cover = excluded.cover, mtime = excluded.mtime";
+        duration_secs = excluded.duration_secs, cover = excluded.cover, mtime = excluded.mtime,
+        disc_no = excluded.disc_no";
 
 /// One file in the local library. Tag data as read at scan time; `mtime` is the change detector.
 #[derive(Debug, Clone)]
@@ -854,10 +1174,23 @@ pub struct LocalTrack {
     /// tracks name different performers.
     pub album_artist: Option<String>,
     pub track_no: i64,
+    /// 0 when the file has no disc tag.
+    pub disc_no: i64,
     pub duration_secs: i64,
     /// Absolute path to the cover image (extracted or found next to the files).
     pub cover: Option<String>,
     pub mtime: i64,
+}
+
+/// A playlist kept on this machine, as the library grid and the playlist header need it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalPlaylist {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub count: i64,
+    /// The first track's stored `SongItem`, whose artwork stands in for a cover nobody picked.
+    pub first_song: Option<String>,
 }
 
 #[cfg(test)]
@@ -945,6 +1278,57 @@ mod tests {
     }
 
     #[test]
+    fn local_playlists_hold_tracks_in_order_and_outlive_the_account_index() {
+        let d = db();
+        let song = |v: &str| (v.to_string(), format!(r#"{{"video_id":"{v}"}}"#));
+        let a = d.create_local_playlist("Road trip", 10).unwrap();
+        let b = d.create_local_playlist("Empty", 11).unwrap();
+        assert_ne!(a, b);
+
+        // A duplicate is refused per row, the rest of the batch still lands.
+        let added = d.add_local_playlist_tracks(a, &[song("x"), song("y"), song("x")], 20).unwrap();
+        assert_eq!(added, [true, true, false]);
+        assert!(d.add_local_playlist_tracks(999, &[song("z")], 20).is_err(), "no such playlist");
+
+        // Most recently changed first; the count and the first track come with the row.
+        let all = d.local_playlists();
+        assert_eq!(all.iter().map(|p| p.id).collect::<Vec<_>>(), [a, b]);
+        assert_eq!((all[0].count, all[1].count), (2, 0));
+        assert_eq!(all[0].first_song.as_deref(), Some(r#"{"video_id":"x"}"#));
+        assert_eq!(all[1].first_song, None);
+        let rows = d.local_playlist_tracks(a);
+        assert_eq!(rows.iter().map(|r| r.1.contains('x')).collect::<Vec<_>>(), [true, false]);
+
+        // The membership index names it by browseId, and the account-side prunes leave it alone.
+        let key = format!("{}{a}", crate::state::LOCAL_PLAYLIST_PREFIX);
+        d.set_playlist_tracks("VL1", &["x".into()]);
+        d.clear_playlist_index();
+        d.retain_playlists(&[]);
+        assert_eq!(d.playlist_memberships()["x"], vec![key.clone()]);
+
+        // A row id only removes inside its own playlist.
+        d.remove_local_playlist_tracks(b, &[rows[0].0], 30).unwrap();
+        assert_eq!(d.local_playlist_tracks(a).len(), 2);
+        d.remove_local_playlist_tracks(a, &[rows[0].0], 30).unwrap();
+        assert_eq!(d.local_playlist(a).unwrap().first_song.as_deref(), Some(r#"{"video_id":"y"}"#));
+        assert!(!d.playlist_memberships().contains_key("x"));
+
+        d.edit_local_playlist(a, Some("Renamed"), None, 40).unwrap();
+        d.edit_local_playlist(a, None, Some("notes"), 41).unwrap();
+        let p = d.local_playlist(a).unwrap();
+        assert_eq!((p.title.as_str(), p.description.as_str()), ("Renamed", "notes"));
+        assert!(d.edit_local_playlist(999, Some("x"), None, 42).is_err());
+
+        d.delete_local_playlist(a).unwrap();
+        assert!(d.local_playlist(a).is_none());
+        assert!(d.local_playlist_tracks(a).is_empty(), "its rows go with it");
+        // AUTOINCREMENT: a deleted playlist's number is never handed to the next one, not even
+        // once the table is empty (a plain rowid would start again from 1).
+        d.delete_local_playlist(b).unwrap();
+        assert!(d.create_local_playlist("New", 50).unwrap() > b);
+    }
+
+    #[test]
     fn opening_the_db_clears_local_files_out_of_on_repeat() {
         // 0.3.1 counted local plays before On Repeat excluded them; opening the db drops the rows.
         let path = std::env::temp_dir().join("limusic-plays-purge-test.sqlite");
@@ -971,6 +1355,40 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// v1.0.0: Boidu switched off carries over as the first entry of the provider order, the
+    /// cache is purged once, and from then on clearing it spares hand-picked lyrics.
+    #[test]
+    fn opening_the_db_migrates_the_boidu_switch_and_pins_survive_clears() {
+        let path = std::env::temp_dir().join("limusic-lyrics-providers-test.sqlite");
+        std::fs::remove_file(&path).ok();
+        {
+            let d = Db::open(&path).unwrap();
+            let conn = d.0.lock().unwrap();
+            conn.execute_batch("PRAGMA user_version = 1").unwrap();
+            conn.execute("INSERT INTO settings(key, value) VALUES('lyrics_boidu', 'false')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO lyrics_cache VALUES('old', '{\"source\":\"LRCLIB\"}', 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.get_setting("lyrics_providers").as_deref(), Some("-boidu"));
+        assert_eq!(d.get_setting("lyrics_boidu"), None);
+        assert_eq!(d.get_lyrics("old", 2, 10), None, "purged once");
+
+        d.put_lyrics("auto", Some("{\"source\":\"LRCLIB\"}"), 2);
+        d.put_lyrics("picked", Some("{\"source\":\"Kugou\",\"pinned\":true}"), 2);
+        d.put_lyrics("miss", None, 2);
+        d.clear_lyrics_cache();
+        assert_eq!(d.get_lyrics("auto", 2, 10), None);
+        assert_eq!(d.get_lyrics("miss", 2, 10), None);
+        assert!(d.get_lyrics("picked", 2, 10).is_some(), "a hand-picked source is not a cache");
+        drop(d);
+        std::fs::remove_file(&path).ok();
+    }
+
     /// A cache row with only the fields a test cares about; the rest are the boring defaults.
     fn row(url: &str, expires_at: i64) -> CachedStream {
         CachedStream {
@@ -981,6 +1399,7 @@ mod tests {
             is_video: None,
             ping_url: None,
             ping_client: None,
+            client: None,
         }
     }
 
@@ -1044,6 +1463,19 @@ mod tests {
 
         let none = d.get_stream("unpinged", 900).unwrap();
         assert!(none.ping_url.is_none() && none.ping_client.is_none());
+    }
+
+    /// A replay rebuilds its headers from the recorded client, so it has to survive the cache.
+    /// No test for a pre-column row reading as `None`: the migration wipes those.
+    #[test]
+    fn a_cached_stream_round_trips_its_client() {
+        let d = db();
+        d.put_stream(
+            "v",
+            &CachedStream { client: Some("VISIONOS".into()), ..row("https://x/1", 9_000) },
+            900,
+        );
+        assert_eq!(d.get_stream("v", 900).unwrap().client.as_deref(), Some("VISIONOS"));
     }
 
     #[test]
@@ -1232,6 +1664,425 @@ mod tests {
             );
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A fresh directory per test: these run in parallel and each one moves files around.
+    fn qtest_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("limusic-qtest-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn open_or_quarantine_moves_a_corrupt_file_aside() {
+        let dir = qtest_dir("corrupt");
+        let path = dir.join("limusic.sqlite");
+        std::fs::write(&path, b"this is not a sqlite file").unwrap();
+        {
+            let (d, aside) = Db::open_or_quarantine(&path).unwrap();
+            let aside = aside.expect("a corrupt file is moved aside");
+            assert_eq!(std::fs::read(&aside).unwrap(), b"this is not a sqlite file");
+            d.set_setting("k", "v");
+        }
+        let d = Db::open(&path).unwrap();
+        assert_eq!(d.get_setting("k").as_deref(), Some("v"), "the fresh file is a working db");
+        drop(d);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The recovery path must never fire on a healthy database: it would hand the user an empty
+    /// library for nothing.
+    #[test]
+    fn open_or_quarantine_leaves_a_healthy_file_alone() {
+        let dir = qtest_dir("healthy");
+        let path = dir.join("limusic.sqlite");
+        Db::open(&path).unwrap().set_setting("k", "v");
+        let (d, aside) = Db::open_or_quarantine(&path).unwrap();
+        assert_eq!(aside, None);
+        assert_eq!(d.get_setting("k").as_deref(), Some("v"));
+        let moved = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains("corrupt"));
+        assert!(!moved, "nothing was moved aside");
+        drop(d);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Moving a healthy library aside because it could not be *opened* (locked, permissions) would
+    /// cost the user everything for nothing. A directory at the path is a portable stand-in for
+    /// "cannot open, but not corrupt".
+    #[test]
+    fn open_or_quarantine_leaves_an_unopenable_path_alone() {
+        let dir = qtest_dir("unopenable");
+        let path = dir.join("limusic.sqlite");
+        std::fs::create_dir(&path).unwrap();
+        assert!(Db::open_or_quarantine(&path).is_err());
+        assert!(path.is_dir(), "nothing was moved aside");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// SQLite deletes stray -wal/-shm files itself while failing to open a corrupt main file, so
+    /// they are usually gone before the rename loop runs; the loop is a backstop for any it
+    /// leaves. Either way, the outcome that matters is that the fresh file does not inherit them.
+    #[test]
+    fn open_or_quarantine_drops_the_stale_wal_sidecars() {
+        let dir = qtest_dir("sidecars");
+        let path = dir.join("limusic.sqlite");
+        std::fs::write(&path, b"this is not a sqlite file").unwrap();
+        std::fs::write(dir.join("limusic.sqlite-wal"), b"stale wal").unwrap();
+        std::fs::write(dir.join("limusic.sqlite-shm"), b"stale shm").unwrap();
+        let (d, aside) = Db::open_or_quarantine(&path).unwrap();
+        assert!(aside.is_some_and(|a| a.exists()), "the corrupt file is moved aside");
+        for suffix in ["-wal", "-shm"] {
+            let now =
+                std::fs::read(dir.join(format!("limusic.sqlite{suffix}"))).unwrap_or_default();
+            assert!(!now.starts_with(b"stale"), "the fresh db inherited the old {suffix}");
+        }
+        drop(d);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- upgrading a database an older release wrote ------------------------------------------
+    //
+    // Every other file-backed test here starts from `Db::open`, which means from the *current*
+    // schema, so none of them ever runs the ALTERs and one-shot migrations in `open` against a
+    // file that actually needs them. These do. Each constant is the `execute_batch` SQL one shipped
+    // release ran, copied verbatim from `git show <tag>:src-tauri/src/db.rs`. They are pinned as
+    // literals on purpose: a schema generated from the current code would drift along with it and
+    // stop being a record of what users' files really look like, which is the only thing that
+    // makes the test worth having. Never edit one to make a test pass; add a new tag instead.
+    //
+    // Why these three:
+    // - v0.4.11: `stream_url_cache` is five columns, `local_tracks` has no `album_artist`, no
+    //   `accounts`. Every ALTER in `open` has work to do and both cache wipes fire. The long tail:
+    //   .deb, .rpm and AUR installs never self-update, so some users really are on it.
+    // - v0.5.12: has `is_video` and the ping columns but still no `accounts`, so it isolates the
+    //   legacy single-session migration from most of the column work.
+    // - v0.8.1: the predecessor of 0.8.2, which is where most self-updating installs sit. It lacks
+    //   only `client`, so the one thing opening it does is the `client` wipe. The common path.
+
+    const SCHEMA_V0_4_11: &str = r#"
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS stream_url_cache (
+                video_id    TEXT PRIMARY KEY,
+                url         TEXT NOT NULL,
+                itag        INTEGER NOT NULL,
+                expires_at  INTEGER NOT NULL,
+                loudness_db REAL
+            );
+            CREATE TABLE IF NOT EXISTS lyrics_cache (
+                video_id   TEXT PRIMARY KEY,
+                lyrics     TEXT,
+                fetched_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS plays (
+                id        INTEGER PRIMARY KEY,
+                video_id  TEXT NOT NULL,
+                played_at INTEGER NOT NULL,
+                song_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS plays_played_at ON plays(played_at);
+            CREATE TABLE IF NOT EXISTS local_tracks (
+                path          TEXT PRIMARY KEY,
+                title         TEXT NOT NULL,
+                artist        TEXT NOT NULL,
+                album         TEXT NOT NULL,
+                album_key     TEXT NOT NULL,
+                track_no      INTEGER NOT NULL,
+                duration_secs INTEGER NOT NULL,
+                cover         TEXT,
+                mtime         INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS local_tracks_album ON local_tracks(album_key);
+            CREATE TABLE IF NOT EXISTS playlist_track (
+                playlist_id TEXT NOT NULL,
+                video_id    TEXT NOT NULL,
+                PRIMARY KEY (playlist_id, video_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS playlist_track_video ON playlist_track(video_id);
+            "#;
+
+    const SCHEMA_V0_5_12: &str = r#"
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS stream_url_cache (
+                video_id    TEXT PRIMARY KEY,
+                url         TEXT NOT NULL,
+                itag        INTEGER NOT NULL,
+                expires_at  INTEGER NOT NULL,
+                loudness_db REAL,
+                is_video    INTEGER,
+                ping_url    TEXT,
+                ping_client TEXT
+            );
+            CREATE TABLE IF NOT EXISTS lyrics_cache (
+                video_id   TEXT PRIMARY KEY,
+                lyrics     TEXT,
+                fetched_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS plays (
+                id        INTEGER PRIMARY KEY,
+                video_id  TEXT NOT NULL,
+                played_at INTEGER NOT NULL,
+                song_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS plays_played_at ON plays(played_at);
+            CREATE TABLE IF NOT EXISTS local_tracks (
+                path          TEXT PRIMARY KEY,
+                title         TEXT NOT NULL,
+                artist        TEXT NOT NULL,
+                album         TEXT NOT NULL,
+                album_key     TEXT NOT NULL,
+                album_artist  TEXT,
+                track_no      INTEGER NOT NULL,
+                duration_secs INTEGER NOT NULL,
+                cover         TEXT,
+                mtime         INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS local_tracks_album ON local_tracks(album_key);
+            CREATE TABLE IF NOT EXISTS playlist_track (
+                playlist_id TEXT NOT NULL,
+                video_id    TEXT NOT NULL,
+                PRIMARY KEY (playlist_id, video_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS playlist_track_video ON playlist_track(video_id);
+            "#;
+
+    const SCHEMA_V0_8_1: &str = r#"
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS stream_url_cache (
+                video_id    TEXT PRIMARY KEY,
+                url         TEXT NOT NULL,
+                itag        INTEGER NOT NULL,
+                expires_at  INTEGER NOT NULL,
+                loudness_db REAL,
+                is_video    INTEGER,
+                ping_url    TEXT,
+                ping_client TEXT
+            );
+            CREATE TABLE IF NOT EXISTS lyrics_cache (
+                video_id   TEXT PRIMARY KEY,
+                lyrics     TEXT,
+                fetched_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS plays (
+                id        INTEGER PRIMARY KEY,
+                video_id  TEXT NOT NULL,
+                played_at INTEGER NOT NULL,
+                song_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS plays_played_at ON plays(played_at);
+            CREATE TABLE IF NOT EXISTS local_tracks (
+                path          TEXT PRIMARY KEY,
+                title         TEXT NOT NULL,
+                artist        TEXT NOT NULL,
+                album         TEXT NOT NULL,
+                album_key     TEXT NOT NULL,
+                album_artist  TEXT,
+                track_no      INTEGER NOT NULL,
+                duration_secs INTEGER NOT NULL,
+                cover         TEXT,
+                mtime         INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS local_tracks_album ON local_tracks(album_key);
+            CREATE TABLE IF NOT EXISTS playlist_track (
+                playlist_id TEXT NOT NULL,
+                video_id    TEXT NOT NULL,
+                PRIMARY KEY (playlist_id, video_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS playlist_track_video ON playlist_track(video_id);
+            CREATE TABLE IF NOT EXISTS accounts (
+                id                     TEXT PRIMARY KEY,
+                session_cookie         TEXT NOT NULL,
+                data_sync_id           TEXT,
+                selected_identity_json TEXT,
+                account_json           TEXT,
+                visitor_data           TEXT,
+                added_at               INTEGER NOT NULL
+            );
+            "#;
+
+    const LEGACY_COOKIE: &str = "SAPISID=legacy-sapisid; SID=legacy-sid";
+
+    /// Builds a database file the way the release behind `schema` left it, then runs everything a
+    /// user upgrading from it would need to be true, through `Db` itself.
+    ///
+    /// The old file is written with raw rusqlite, never `Db`, which would migrate it before the
+    /// test got a look. The seeded rows use only columns the oldest schema has, so the same seed
+    /// fits all three. `migrated_account` says whether that release had already moved the sign-in
+    /// into `accounts` (0.8.x did, on its own first launch); either way the legacy `settings` rows
+    /// are there, because every release keeps them as projections of the active account.
+    fn assert_upgrades_cleanly(tag: &str, schema: &str, migrated_account: bool) {
+        let dir = qtest_dir(&format!("upgrade-{tag}"));
+        let path = dir.join("limusic.sqlite");
+        let now = now_secs();
+        let later = now + 6 * 3600;
+        let id = account_key(LEGACY_COOKIE).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(schema).unwrap();
+            for (key, value) in [
+                ("volume", "0.42"),
+                ("session_cookie", LEGACY_COOKIE),
+                ("data_sync_id", "channel-legacy"),
+                ("selected_identity_json", r#"{"data_sync_id":"channel-legacy"}"#),
+                ("account_json", r#"{"name":"Legacy"}"#),
+                ("visitor_data", "vd-legacy"),
+            ] {
+                conn.execute("INSERT INTO settings(key, value) VALUES(?1, ?2)", [key, value])
+                    .unwrap();
+            }
+            if migrated_account {
+                conn.execute(
+                    "INSERT INTO accounts(id, session_cookie, data_sync_id, \
+                     selected_identity_json, account_json, visitor_data, added_at) \
+                     VALUES(?1, ?2, 'channel-legacy', '{\"data_sync_id\":\"channel-legacy\"}', \
+                     '{\"name\":\"Legacy\"}', 'vd-legacy', 100)",
+                    [&id, LEGACY_COOKIE],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO settings(key, value) VALUES('active_account', ?1)",
+                    [&id],
+                )
+                .unwrap();
+            }
+            // Unexpired, so if it disappears it was the migration's wipe and not the expiry sweep.
+            conn.execute(
+                "INSERT INTO stream_url_cache(video_id, url, itag, expires_at, loudness_db) \
+                 VALUES('old-row', 'https://x/old', 251, ?1, -3.5)",
+                [later],
+            )
+            .unwrap();
+            for (video_id, song_json) in
+                [("dQw4w9WgXcQ", r#"{"yt":1}"#), ("LOCAL:/music/a.mp3", r#"{"local":1}"#)]
+            {
+                conn.execute(
+                    "INSERT INTO plays(video_id, played_at, song_json) VALUES(?1, 1000, ?2)",
+                    [video_id, song_json],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO local_tracks(path, title, artist, album, album_key, track_no, \
+                 duration_secs, cover, mtime) \
+                 VALUES('/music/a.mp3', 'A', 'Artist', 'Album', 'artist--album', 1, 200, NULL, 5)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO playlist_track(playlist_id, video_id) VALUES('VL1', 'dQw4w9WgXcQ')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Checkpoints 1 and 6 in one call: `open_or_quarantine` tries `Db::open` first and returns
+        // `None` only when that succeeded, so this is both "it opens" and "an old file is not
+        // mistaken for a damaged one and moved aside, taking the library with it".
+        let (d, aside) = Db::open_or_quarantine(&path).unwrap();
+        assert_eq!(aside, None, "{tag}: an old but healthy database was quarantined");
+
+        // Checkpoint 2, through the real accessors rather than `PRAGMA table_info`: `put_stream`
+        // and `get_stream` name every column the current code reads and writes, and both swallow
+        // errors, so a column the migration failed to add shows up here as a row that never
+        // comes back.
+        let fresh = CachedStream {
+            url: "https://x/fresh".into(),
+            itag: 251,
+            expires_at: later,
+            loudness_db: Some(-2.0),
+            is_video: Some(true),
+            ping_url: Some("https://s.youtube.com/api/stats/playback".into()),
+            ping_client: Some("WEB_REMIX".into()),
+            client: Some("VISIONOS".into()),
+        };
+        d.put_stream("fresh", &fresh, now);
+        let got = d.get_stream("fresh", now).unwrap_or_else(|| {
+            panic!("{tag}: the current cache query does not work on the upgraded file")
+        });
+        assert_eq!(
+            (got.url.as_str(), got.loudness_db, got.is_video, got.client.as_deref()),
+            ("https://x/fresh", Some(-2.0), Some(true), Some("VISIONOS")),
+            "{tag}"
+        );
+        assert_eq!(got.ping_client.as_deref(), Some("WEB_REMIX"), "{tag}");
+        // Every one of these releases predates `client`, so the pre-column row has to be gone:
+        // its headers cannot be rebuilt. Checked after the round trip above, which is what
+        // proves `None` here means "deleted" and not "the query failed".
+        assert!(d.get_stream("old-row", now).is_none(), "{tag}: the stale cache row survived");
+
+        // Checkpoint 3: the user's history and library come through untouched, except the local
+        // play, which `open` removes on purpose (On Repeat excludes local files since 0.3.1).
+        assert_eq!(d.get_setting("volume").as_deref(), Some("0.42"), "{tag}");
+        assert_eq!(d.top_plays(0, 20), vec![(r#"{"yt":1}"#.to_string(), 1)], "{tag}");
+        let tracks = d.local_tracks(None);
+        assert_eq!(tracks.len(), 1, "{tag}");
+        assert_eq!((tracks[0].path.as_str(), tracks[0].title.as_str()), ("/music/a.mp3", "A"));
+        assert_eq!(tracks[0].album_artist, None, "{tag}: a new column reads as unknown");
+        assert_eq!(d.playlist_memberships()["dQw4w9WgXcQ"], vec!["VL1"], "{tag}");
+        // The playlists-on-this-device tables are new in 1.0.0, so every older file must get them.
+        let mine = d.create_local_playlist("Mine", now).unwrap();
+        assert_eq!(
+            d.add_local_playlist_tracks(mine, &[("v".into(), "{}".into())], now).unwrap(),
+            [true]
+        );
+
+        // Checkpoint 4: still signed in. One account, keyed the way this build computes it,
+        // carrying the identity the old release stored, and pointed at as the active one.
+        let accounts = d.list_accounts();
+        assert_eq!(accounts.len(), 1, "{tag}: expected exactly the one signed-in account");
+        let a = &accounts[0];
+        assert_eq!(a.id, id, "{tag}");
+        assert_eq!(a.session_cookie, LEGACY_COOKIE, "{tag}");
+        assert_eq!(a.data_sync_id.as_deref(), Some("channel-legacy"), "{tag}");
+        assert_eq!(
+            a.selected_identity_json.as_deref(),
+            Some(r#"{"data_sync_id":"channel-legacy"}"#),
+            "{tag}"
+        );
+        assert_eq!(a.account_json.as_deref(), Some(r#"{"name":"Legacy"}"#), "{tag}");
+        assert_eq!(a.visitor_data.as_deref(), Some("vd-legacy"), "{tag}");
+        if migrated_account {
+            assert_eq!(a.added_at, 100, "{tag}: an existing account row was rewritten");
+        }
+        assert_eq!(d.get_setting("active_account").as_deref(), Some(id.as_str()), "{tag}");
+        assert_eq!(d.get_setting("session_cookie").as_deref(), Some(LEGACY_COOKIE), "{tag}");
+        drop(d);
+
+        // Checkpoint 5: the wipes are one-shot. They key off an ALTER succeeding, so if one ever
+        // reported success on a file that already had the column, every launch would empty the
+        // cache and nothing else would notice. The row written above has to outlive a relaunch.
+        let d = Db::open(&path).unwrap();
+        assert!(d.get_stream("fresh", now).is_some(), "{tag}: the cache was wiped again");
+        assert_eq!(d.list_accounts().len(), 1, "{tag}: a relaunch duplicated the account");
+        drop(d);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_v0_4_11_database_upgrades_cleanly() {
+        assert_upgrades_cleanly("v0.4.11", SCHEMA_V0_4_11, false);
+    }
+
+    #[test]
+    fn a_v0_5_12_database_upgrades_cleanly() {
+        assert_upgrades_cleanly("v0.5.12", SCHEMA_V0_5_12, false);
+    }
+
+    #[test]
+    fn a_v0_8_1_database_upgrades_cleanly() {
+        assert_upgrades_cleanly("v0.8.1", SCHEMA_V0_8_1, true);
     }
 
     #[test]

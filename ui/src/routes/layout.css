@@ -531,7 +531,11 @@
 }
 
 /* The blurred cover behind a hero (HomeHero, NowPlaying, the album and library headers), on its
-   own compositing layer. That promotion is the whole point of the class: left unpromoted,
+   own compositing layer. Put it on the element that holds the blurred image *and* the gradient
+   that fades it out, clipped (`overflow-hidden`), never on the image alone: two layers land a pixel
+   apart during WebKitGTK's animated wheel scroll, and a row of the raw wash flickers past the
+   fade's last line. NowPlaying's image carries it directly because it has no fade and never
+   scrolls. That promotion is the whole point of the class: left unpromoted,
    WebKitGTK re-runs the 40px gaussian over the element every time anything underneath it repaints,
    and the artwork tint below repaints the entire document on every frame of its crossfade. In the
    now-playing view the wash is the size of the window, so a track change spent more time
@@ -542,8 +546,14 @@
    all of it, so the wash stays. (An earlier note in NowPlaying.svelte has promotion measuring as
    noise: that was the video case, where the damage is the video *under* the blur every frame and
    the layer has to be re-rasterized regardless. Still true, and still why the wash is dropped
-   while a video plays.) */
-.art-wash {
+   while a video plays.)
+
+   Not on Chromium (WebView2, Windows), where the promotion is what costs the frames (#341). There
+   the wash's layer is re-blurred every time something above it repaints, and every hover animation
+   that creates a layer pays overlap tests against it. Unpromoted, the blur is rasterized into the
+   page's tiles once. Measured 2026-09-28, perf/scroll.mjs, 1920x1080, 4x CPU, frames over 20 ms:
+   lyrics panel idle while playing 100% -> 4-11%, Home top hover 53% -> 30%. */
+html:not(.chromium) .art-wash {
 	will-change: transform;
 }
 
@@ -672,6 +682,14 @@ html.art-tint.dark {
 	html {
 		@apply font-sans;
 	}
+	button:not(:disabled),
+	[role='button'] {
+		/* Tailwind v4's preflight drops the UA stylesheet's pointer cursor on <button>, so a control
+		   only got one where someone remembered a cursor-pointer class, and most did not (issue #257).
+		   One base rule covers every button and every div-as-button card; anything that wants a
+		   different cursor still wins with its own utility, since utilities come after base. */
+		cursor: pointer;
+	}
 	img {
 		/* No artwork in this app is a drag payload: the drag sources for the shortcuts grid and the
 		   queue are the wrapping card/row, never the image. Left native, every <img> peels off a
@@ -714,6 +732,228 @@ html.art-tint.dark {
 .card-grid > * {
 	content-visibility: auto;
 	contain-intrinsic-size: auto 12.75rem;
+}
+
+/* --- Moods & Genres tiles (search page) ---
+   Three sections, one family: the name top left, YouTube's colour for the tile (--mood, set inline)
+   mixed into --card so the name stays --foreground on every theme whatever colour YouTube picked,
+   and a cover from the tile's category fading into the card on the right. What changes per section
+   is how that cover sits: For you gets a panel and the app's mark, Moods & moments a record that
+   spins under the pointer, Genres a tilted sleeve with its colour glowing up from behind it.
+   Every hover effect is a transform or an opacity, and only on the one tile under the pointer. */
+.mood-grid {
+	display: grid;
+	gap: 0.75rem;
+}
+.mood-grid.for-you {
+	grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+}
+.mood-grid.moods {
+	grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr));
+}
+.mood-grid.genres {
+	grid-template-columns: repeat(auto-fill, minmax(11.5rem, 1fr));
+}
+.mood {
+	position: relative;
+	isolation: isolate;
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+	align-items: flex-start;
+	padding: 1rem 1.125rem;
+	border: 1px solid color-mix(in oklab, var(--foreground) 7%, transparent);
+	border-radius: calc(var(--radius) * 2 + 0.375rem);
+	background: color-mix(in oklab, var(--mood) 14%, var(--card));
+	color: var(--foreground);
+	text-align: left;
+	cursor: pointer;
+	transition:
+		border-color 200ms ease-out,
+		transform 150ms ease-out;
+}
+.mood:hover {
+	border-color: color-mix(in oklab, var(--mood) 50%, transparent);
+}
+.mood:active {
+	transform: scale(0.98);
+}
+.mood:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+.mood-title {
+	max-width: 58%;
+	font-family: var(--font-heading);
+	font-weight: 700;
+	line-height: 1.15;
+	overflow-wrap: anywhere;
+}
+/* Fades in once decoded rather than popping in; a cover that fails is dropped by the page. */
+.mood-art {
+	position: absolute;
+	z-index: -1;
+	object-fit: cover;
+	opacity: 0;
+	transition:
+		opacity 300ms ease-out,
+		transform 400ms ease-out;
+}
+.mood-art.ready {
+	opacity: 1;
+}
+
+/* For you: the cover as a panel on the right, fading left into the card, and the app's mark. */
+.for-you .mood {
+	height: 8.5rem;
+}
+.for-you .mood-title {
+	font-size: 1.25rem;
+}
+.for-you .mood-art {
+	top: 0;
+	right: 0;
+	width: 58%;
+	height: 100%;
+	-webkit-mask-image: linear-gradient(to right, transparent, #000 70%);
+	mask-image: linear-gradient(to right, transparent, #000 70%);
+}
+.for-you .mood:hover .mood-art {
+	transform: scale(1.06);
+}
+.mood-logo {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.875rem;
+	height: 1.875rem;
+	border-radius: 9999px;
+	background: color-mix(in oklab, var(--background) 70%, transparent);
+	box-shadow: 0 0 0 1px color-mix(in oklab, var(--mood) 50%, transparent);
+}
+.mood-logo img {
+	width: 1.125rem;
+	height: 1.125rem;
+}
+
+/* Moods & moments: the cover as a record half off the right edge. The fade lives on the outer
+   ring and the spin on the inner one, or the fade would turn with the record. */
+.moods .mood {
+	height: 7rem;
+}
+.moods .mood-title {
+	font-size: 1.0625rem;
+}
+.mood-disc {
+	position: absolute;
+	z-index: -1;
+	top: 50%;
+	right: -1.75rem;
+	width: 7.5rem;
+	height: 7.5rem;
+	margin-top: -3.75rem;
+	-webkit-mask-image: linear-gradient(to right, transparent, #000 60%);
+	mask-image: linear-gradient(to right, transparent, #000 60%);
+}
+.mood-spin {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	border-radius: 9999px;
+	background: color-mix(in oklab, var(--mood) 45%, transparent);
+}
+.mood-spin .mood-art {
+	/* Over the frame's placeholder tint: at the shared -1 it would paint behind it. */
+	z-index: 0;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+}
+/* The spindle hole, in the card's own colour. */
+.mood-spin::after {
+	content: '';
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	width: 1rem;
+	height: 1rem;
+	margin: -0.5rem;
+	border-radius: 9999px;
+	background: color-mix(in oklab, var(--mood) 14%, var(--card));
+	box-shadow: 0 0 0 3px color-mix(in oklab, var(--foreground) 12%, transparent);
+}
+.moods .mood:hover .mood-spin {
+	animation: mood-spin 5s linear infinite;
+}
+@keyframes mood-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+.mood-pill {
+	width: 1.75rem;
+	height: 0.3125rem;
+	border-radius: 9999px;
+	background: var(--mood);
+}
+
+/* Genres: the cover as a tilted sleeve in the corner that straightens under the pointer, with the
+   genre's colour as light coming from behind it rather than a mark of its own. Below the sleeve
+   (-2 against its -1), above the card's tint. */
+.genres .mood {
+	height: 6.25rem;
+}
+.genres .mood::before {
+	content: '';
+	position: absolute;
+	inset: 0;
+	z-index: -2;
+	background: radial-gradient(
+		55% 95% at 100% 100%,
+		color-mix(in oklab, var(--mood) 50%, transparent),
+		transparent 75%
+	);
+}
+.genres .mood-title {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.5rem;
+	max-width: 62%;
+	font-size: 0.975rem;
+}
+/* Centred on the first line, so a name that wraps hangs under itself, not under the dot. */
+.mood-dot {
+	flex-shrink: 0;
+	width: 0.5rem;
+	height: 0.5rem;
+	margin-top: 0.32em;
+	border-radius: 9999px;
+	background: var(--mood);
+}
+.mood-sleeve {
+	position: absolute;
+	z-index: -1;
+	right: -0.5rem;
+	bottom: -1.25rem;
+	width: 5.25rem;
+	height: 5.25rem;
+	overflow: hidden;
+	border-radius: calc(var(--radius) + 0.125rem);
+	background: color-mix(in oklab, var(--mood) 45%, transparent);
+	transform: rotate(16deg);
+	transition: transform 250ms ease-out;
+	-webkit-mask-image: linear-gradient(to left, #000 45%, transparent);
+	mask-image: linear-gradient(to left, #000 45%, transparent);
+}
+.mood-sleeve .mood-art {
+	z-index: 0;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+}
+.genres .mood:hover .mood-sleeve {
+	transform: rotate(6deg) translateY(-0.375rem);
 }
 
 /* A track title too wide for the player scrolls itself instead of stopping at an ellipsis.
@@ -811,6 +1051,20 @@ input[type='range'].range:active::-webkit-slider-thumb {
 }
 ::-webkit-scrollbar-corner {
 	background: transparent;
+}
+
+/* A shelf's sideways scrollbar. The arrows and the edge fades already say "this row continues", so
+   the bar is a hairline that only shows while the pointer is on the row: at 8px under every shelf
+   it was the heaviest line on home (#319). Still there for dragging, and the row still scrolls with
+   a trackpad or shift+wheel when it is invisible. */
+.rail::-webkit-scrollbar {
+	height: 4px;
+}
+.rail::-webkit-scrollbar-thumb {
+	background: transparent;
+}
+.rail:hover::-webkit-scrollbar-thumb {
+	background: color-mix(in srgb, var(--muted-foreground) 35%, transparent);
 }
 
 /* Respect users who ask the OS to minimise motion. */

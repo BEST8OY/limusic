@@ -30,6 +30,16 @@ use fetcher::PlayerJsFetcher;
 const CIPHER_LABEL: &str = "limusic-cipher";
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long an "this player has no config" verdict stands before it is re-checked.
+///
+/// It must expire. The community registries publish a config for a rotated `player.js` within
+/// hours, and nothing else in the process ever re-asks: `owes_work` short-circuits on an analysed
+/// epoch, and the orchestrator's self-heal cannot fire without a signature function to fail with.
+/// So a rotation that lands mid-session used to cost WEB_REMIX and TVHTML5_SIMPLY for the rest of
+/// the run, leaving VISIONOS as the only client that still plays a whole track (KNOWN-ISSUES
+/// KI-12). The retry is cheap: `player.js` is disk-cached for six hours and the registry fetch
+/// behind it is rate-limited to one per `REFRESH_COOLDOWN`.
+const UNKNOWN_PLAYER_RETRY: Duration = Duration::from_secs(15 * 60);
 
 /// Discovery/validation (context/05): prove the injected exports actually WORK before the
 /// orchestrator commits to this player, by running each on a sample input.
@@ -68,6 +78,10 @@ struct Inner {
     discovered: bool,
     /// When the webview last did work, for the idle teardown. `Some` whenever `bridge` is.
     last_used: Option<Instant>,
+    /// When this player's hash was last looked up and not found. `Some` means the analysis
+    /// completed but produced no way to decipher, and that verdict expires after
+    /// [`UNKNOWN_PLAYER_RETRY`]. `None` on every other outcome, including a successful analysis.
+    unknown_player_at: Option<Instant>,
 }
 
 impl Inner {
@@ -75,6 +89,11 @@ impl Inner {
     /// whether the webview window is actually still up, which only the caller can ask Tauri.
     fn owes_work(&self, epoch: u64, want_bridge: bool, bridge_ok: bool) -> bool {
         if !self.analyzed || self.built_epoch != epoch {
+            return true;
+        }
+        // A missing player config is not a permanent verdict, only the answer the registries had
+        // at the time. Re-ask, or this process never deciphers again (see UNKNOWN_PLAYER_RETRY).
+        if self.unknown_player_at.is_some_and(|t| t.elapsed() >= UNKNOWN_PLAYER_RETRY) {
             return true;
         }
         if !want_bridge {
@@ -206,7 +225,7 @@ impl CipherDeobfuscator {
     /// Self-heal after a 403 on a deciphered URL: refresh the config table + invalidate player.js.
     /// Returns true if something changed (caller may clear WEB_REMIX failure memory). context/05, 06.
     pub async fn on_stream_rejected(&self) -> bool {
-        let table_changed = self.config.refresh_after_stream_rejection().await;
+        let table_changed = self.config.refresh_rate_limited().await;
         self.fetcher.invalidate();
         {
             let mut inner = self.inner.lock().await;
@@ -239,8 +258,19 @@ impl CipherDeobfuscator {
     ///
     /// The idle window has to outlast a track: sig/n run once per resolve, so a shorter one would
     /// tear down and rebuild once per song, with the rebuild landing on the play path.
+    ///
+    /// **Never on Windows.** Building the webview back costs a `CreateCoreWebView2Controller`,
+    /// which wry runs on the app's main thread inside a nested message pump
+    /// (`webview2_com::wait_with_pump`), so the whole event loop stops until WebView2 answers. On a
+    /// cold machine that call has been measured at two minutes (issue #288: app frozen, evals
+    /// queued, the backlog draining the instant it returned). One idle web process is cheaper than
+    /// re-paying that once per listening gap. The fix that lets this come back is not needing a
+    /// webview at all (progress/notes/windows-cipher-webview.md).
     // ponytail: called from the periodic task in lib.rs that already ticks for PoToken.
     pub async fn teardown_if_idle(&self, idle: Duration) {
+        if cfg!(target_os = "windows") {
+            return;
+        }
         let mut inner = self.inner.lock().await;
         if !inner.idle_for(idle) {
             return;
@@ -271,11 +301,11 @@ impl CipherDeobfuscator {
         let player = self.fetcher.fetch().await.map_err(|e| e.to_string())?;
         let cfg = self.config.get(&player.hash);
         if cfg.is_none() {
-            // Unknown player hash — pull the registries off the hot path; a validated config for it
-            // lands on the next rebuild (context/05 §forceRefresh). This run can't decipher.
+            // Unknown player hash: pull the registries off the hot path. This run cannot decipher,
+            // and `UNKNOWN_PLAYER_RETRY` is what brings us back here once they have published one.
             let config = self.config.clone();
             tauri::async_runtime::spawn(async move {
-                config.force_refresh().await;
+                config.refresh_rate_limited().await;
             });
         }
         // STS still comes from player.js when the registry hasn't listed this hash yet: it is a
@@ -299,10 +329,12 @@ impl CipherDeobfuscator {
             inner.analyzed = true;
             inner.discovered = true; // nothing to discover: no config means no exports to probe
             inner.last_used = None;
+            inner.unknown_player_at = Some(Instant::now());
             tracing::info!(
                 hash = player.hash,
                 ?sts,
-                "cipher: no player config for this hash — skipping the webview build (KI-1)"
+                "cipher: no player config for this hash, skipping the webview build (KI-1); \
+                 re-checking the registries shortly"
             );
             return Ok(());
         }
@@ -318,6 +350,7 @@ impl CipherDeobfuscator {
             inner.built_epoch = epoch;
             inner.analyzed = true;
             inner.discovered = false;
+            inner.unknown_player_at = None;
             tracing::info!(hash = player.hash, ?sts, "cipher: analysis complete (no webview)");
             return Ok(());
         }
@@ -365,6 +398,7 @@ impl CipherDeobfuscator {
         inner.sig_available = sig_available;
         inner.analyzed = true;
         inner.discovered = true;
+        inner.unknown_player_at = None;
         tracing::info!(sig_available, n_available, "cipher analysis complete");
         Ok(())
     }
@@ -466,6 +500,46 @@ mod tests {
         // Discovery proved there is nothing callable, so a missing webview is not a debt.
         let undecipherable = Inner { sig_available: false, ..discovered };
         assert!(!undecipherable.owes_work(7, true, false));
+    }
+
+    #[test]
+    fn an_unknown_player_is_re_checked_not_written_off() {
+        let fresh = Inner {
+            analyzed: true,
+            discovered: true,
+            built_epoch: 7,
+            unknown_player_at: Some(Instant::now()),
+            ..Inner::default()
+        };
+        assert!(!fresh.owes_work(7, false, false), "a fresh verdict stands, do not spin");
+        assert!(!fresh.owes_work(7, true, false), "a fresh verdict stands, do not spin");
+
+        let expired = Inner {
+            unknown_player_at: Some(Instant::now() - UNKNOWN_PLAYER_RETRY - Duration::from_secs(1)),
+            ..fresh
+        };
+        for want_bridge in [false, true] {
+            assert!(
+                expired.owes_work(7, want_bridge, false),
+                "a rotated player must be re-checked, or the process never deciphers again"
+            );
+        }
+    }
+
+    /// The expiry must apply only to the unknown-hash verdict. Leaking it into a successful
+    /// analysis would rebuild a whole WebKitWebProcess every UNKNOWN_PLAYER_RETRY.
+    #[test]
+    fn a_known_player_never_expires_into_rework() {
+        let known = Inner {
+            analyzed: true,
+            discovered: true,
+            sig_available: true,
+            built_epoch: 7,
+            unknown_player_at: None,
+            ..Inner::default()
+        };
+        assert!(!known.owes_work(7, true, true));
+        assert!(!known.owes_work(7, false, true));
     }
 
     #[test]

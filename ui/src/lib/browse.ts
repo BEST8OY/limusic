@@ -6,7 +6,7 @@ import * as api from './api';
 import type { BrowseItem, SearchResults, SongItem } from './api';
 import { getCached, putCached } from './pagecache';
 import { t } from './i18n.svelte';
-import { enqueue, playFrom, playSong, toast, touchPick } from './player.svelte';
+import { enqueue, openAddManyToPlaylist, playFrom, playSong, toast, touchPick } from './player.svelte';
 
 /**
  * A song card carries everything a queue entry needs; the ⋯ menus take this shape. The one mapping
@@ -23,6 +23,8 @@ export const asSong = (i: BrowseItem): SongItem => ({
 	artist_runs: i.artistRuns,
 	artist_id: i.artistRuns?.find((r) => r.id)?.id,
 	duration: i.duration,
+	// Without it the card's ⋯ menu, and the player bar once it plays, have no "Go to album".
+	album_id: i.albumId,
 	play_count: i.playCount,
 	thumbnail: i.thumbnail,
 	explicit: i.explicit,
@@ -110,6 +112,31 @@ export async function enqueueItem(item: BrowseItem, next: boolean): Promise<void
 		}
 	} catch {
 		toast.error(t('toasts.could_not_queue'));
+	}
+}
+
+/**
+ * Save the whole thing to a playlist without opening it: fetch the tracks, then hand them to the
+ * picker. Same contract as `enqueueItem` - callers own the in-flight state, and a failure toasts
+ * rather than throwing.
+ *
+ * ponytail: the first page only. `enqueueItem` passes a playlist's `continuation` to the backend,
+ * which walks the rest into the queue; the add path has no equivalent, so a very long playlist
+ * copies the tracks that came back, and says so rather than quietly dropping the rest. Walk the
+ * pages here if someone asks for the whole 500.
+ */
+export async function addItemToPlaylist(item: BrowseItem): Promise<void> {
+	if (item.kind === 'song') {
+		openAddManyToPlaylist([asSong(item)]);
+		return;
+	}
+	try {
+		const src =
+			item.kind === 'album' ? await api.getAlbum(item.id) : await api.getPlaylist(item.id);
+		if (src.continuation) toast.error(t('toasts.partial_playlist_added'));
+		openAddManyToPlaylist(src.items);
+	} catch {
+		toast.error(t('toasts.could_not_add'));
 	}
 }
 

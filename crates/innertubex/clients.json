@@ -33,6 +33,7 @@
     "clientVersion": "1.0",
     "clientId": "75",
     "userAgent": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)",
+    "friendlyName": "TVHTML5 Simply",
     "useSignatureTimestamp": true,
     "useWebPoTokens": true,
     "requirePoToken": true,

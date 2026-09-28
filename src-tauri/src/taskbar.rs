@@ -30,7 +30,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, GetSystemMetrics, IsWindowVisible, RegisterWindowMessageW,
-    SendMessageW, HICON, ICONINFO, ICON_BIG, SM_CXSMICON, SM_CYSMICON, WM_COMMAND, WM_SETICON,
+    SendMessageW, HICON, ICONINFO, ICON_BIG, ICON_SMALL, SM_CXICON, SM_CXSMICON, SM_CYICON,
+    SM_CYSMICON, SYSTEM_METRICS_INDEX, WM_COMMAND, WM_SETICON,
 };
 
 const ID_PREV: u32 = 1;
@@ -38,8 +39,13 @@ const ID_PLAY_PAUSE: u32 = 2;
 const ID_NEXT: u32 = 3;
 const SUBCLASS_ID: usize = 0x11_4d_05_1c;
 
-/// The `ICON_BIG` handle we last handed the window, so the next one can free it.
+/// The handles we last handed the window, so the next pair can free them.
 static PREV_BIG: AtomicIsize = AtomicIsize::new(0);
+static PREV_SMALL: AtomicIsize = AtomicIsize::new(0);
+/// One icon swap at a time. `set_app_icon` is an async command, so two picks in quick succession
+/// can overlap, and the swap-then-`DestroyIcon` below runs *after* `SendMessageW` returns: the
+/// older call would otherwise free a handle the window has already been given by the newer one.
+static ICON_SWAP: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// `RegisterWindowMessageW("TaskbarButtonCreated")`. The shell sends it once the taskbar button
 /// exists; `ThumbBarAddButtons` before that silently does nothing, and it comes again after an
@@ -311,24 +317,76 @@ fn icon_from_bgra(pixels: &[u32], w: i32, h: i32) -> Option<HICON> {
     }
 }
 
-/// Push a custom app icon at the taskbar button (#173).
+/// Push a custom app icon at the taskbar button and Alt-Tab (#173).
 ///
 /// This exists because `WebviewWindow::set_icon` cannot reach it: Tauri routes that to tao's
 /// `set_window_icon`, which only ever sends `WM_SETICON`/`ICON_SMALL` (Alt-Tab and the small
 /// titlebar icon). `ICON_BIG` is what the taskbar reads, tao leaves it unset, and its window class
 /// registers a null `hIcon`, so Windows falls back to the icon compiled into the .exe. Nothing but
 /// this message changes the button.
-pub fn set_big_icon(window: &tauri::WebviewWindow, img: &tauri::image::Image<'_>) {
-    let Ok(hwnd) = window.hwnd() else { return };
-    let (w, h) = (img.width() as i32, img.height() as i32);
+///
+/// Both are resampled to the size Windows asks for. `ICON_BIG` is documented as `SM_CXICON` and
+/// `ICON_SMALL` as `SM_CXSMICON`; hand the shell a 1024x1024 HICON instead and it stretches the
+/// thing itself, unfiltered (#225).
+///
+/// ponytail: `GetSystemMetrics`, not `GetSystemMetricsForDpi`. The latter needs another `windows`
+/// crate feature to shave a few pixels off a second monitor running a different scale.
+pub fn set_icons(window: &tauri::WebviewWindow, img: &tauri::image::Image<'_>) {
+    let Ok(hwnd) = window.hwnd() else {
+        tracing::warn!("app icon: no main window HWND; the shell keeps the .exe icon");
+        return;
+    };
+    let _swap = ICON_SWAP.lock().unwrap_or_else(|e| e.into_inner());
+    let big = metric(SM_CXICON, SM_CYICON);
+    let small = metric(SM_CXSMICON, SM_CYSMICON);
+    // Alt-Tab and the window menu. Tauri's `set_icon` reaches ICON_SMALL too, but only at the
+    // source's own size, so this replaces it rather than following it.
+    send_icon(hwnd, ICON_SMALL, img, small, &PREV_SMALL);
+    send_icon(hwnd, ICON_BIG, img, big, &PREV_BIG);
+}
+
+/// The size the notification area draws at, for [`crate::tray`].
+pub fn tray_icon_size() -> u32 {
+    metric(SM_CXSMICON, SM_CYSMICON).0 as u32
+}
+
+fn metric(cx: SYSTEM_METRICS_INDEX, cy: SYSTEM_METRICS_INDEX) -> (i32, i32) {
+    (unsafe { GetSystemMetrics(cx) }.max(16), unsafe { GetSystemMetrics(cy) }.max(16))
+}
+
+fn send_icon(
+    hwnd: HWND,
+    which: u32,
+    img: &tauri::image::Image<'_>,
+    (w, h): (i32, i32),
+    prev: &AtomicIsize,
+) {
+    // #299: the taskbar button still shows the .exe icon on at least one Windows 11 machine, and
+    // every way this can fail is a silent `return`. The log is what tells a Windows run whether
+    // ICON_BIG was ever sent, so the next report can be read instead of guessed at.
+    let name = if which == ICON_BIG { "ICON_BIG" } else { "ICON_SMALL" };
+    let img = crate::appicon::scaled(img, w as u32, h as u32);
     let pixels = crate::appicon::premultiplied_bgra(img.rgba());
-    let Some(icon) = icon_from_bgra(&pixels, w, h) else { return };
-    unsafe {
-        SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as _)), Some(LPARAM(icon.0 as _)));
-    }
+    let Some(icon) = icon_from_bgra(&pixels, w, h) else {
+        tracing::warn!(
+            icon = name,
+            want_w = w,
+            want_h = h,
+            got_w = img.width(),
+            got_h = img.height(),
+            "app icon: could not build the HICON"
+        );
+        return;
+    };
+    // WM_SETICON returns the icon it replaced. Zero means the window had none, which is the state
+    // in which the shell falls back to the .exe resource.
+    let replaced = unsafe {
+        SendMessageW(hwnd, WM_SETICON, Some(WPARAM(which as _)), Some(LPARAM(icon.0 as _)))
+    };
+    tracing::info!(icon = name, w, h, replaced = replaced.0 != 0, "app icon sent");
     // The window owns the handle until it is replaced. Freeing the one it just let go keeps a user
     // who tries five icons in a row from leaking five of them.
-    let old = PREV_BIG.swap(icon.0 as isize, Ordering::Relaxed);
+    let old = prev.swap(icon.0 as isize, Ordering::Relaxed);
     if old != 0 {
         unsafe {
             let _ = DestroyIcon(HICON(old as _));

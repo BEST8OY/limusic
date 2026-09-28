@@ -7,7 +7,7 @@
 // added with "Add to queue" sits at the tail of a playlist queue, and grouping the panel by kind
 // instead of by play order drew it under the *playing* playlist's "Next from" heading.
 import type { QueueState, SongItem } from './api.ts';
-import { moveTarget, queueBlocks } from './queue.ts';
+import { moveTarget, queueBlocks, removableFromPlaylist } from './queue.ts';
 
 function ok(cond: boolean, what: string): void {
 	if (!cond) throw new Error(`FAIL: ${what}`);
@@ -188,5 +188,15 @@ ok(moveTarget(6, 2) === 2, 'dragging up: the target is where the bar is');
 ok(moveTarget(2, 9) === 8, 'dropping past the last row appends');
 ok(moveTarget(2, 2) === null, 'in front of yourself is a no-op');
 ok(moveTarget(2, 3) === null, 'and so is just behind yourself');
+
+
+// --- "Remove from this playlist" (issue #270) ---------------------------------------------------
+const inPl = { keep: ['VLPL1'], other: ['VLPL2'] };
+const row = song('keep', { set_video_id: 'SVID' });
+ok(removableFromPlaylist(row, 'VLPL1', inPl), 'own playlist + setVideoId ⇒ removable');
+ok(!removableFromPlaylist(row, null, inPl), 'a radio or single song has no playlist to edit');
+ok(!removableFromPlaylist(song('keep'), 'VLPL1', inPl), 'no setVideoId ⇒ YouTube cannot be told which copy');
+ok(!removableFromPlaylist(row, 'VLPL9', inPl), 'not in that playlist (or not yours) ⇒ hidden');
+ok(!removableFromPlaylist(song('gone', { set_video_id: 'SVID' }), 'VLPL1', inPl), 'song not indexed at all');
 
 console.log('ok');

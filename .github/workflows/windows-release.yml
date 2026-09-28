@@ -91,6 +91,8 @@ jobs:
         run: |
           VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # 1.1.0-rc.1: a release candidate, for the beta channel only (RELEASING.md §8).
+          if [[ "$VERSION" == *-* ]]; then echo "PRERELEASE=true"; else echo "PRERELEASE=false"; fi >> "$GITHUB_ENV"
           if [ "v$VERSION" != "${{ steps.rel.outputs.tag }}" ]; then
             if [ "${{ inputs.dry_run }}" = "true" ]; then
               echo "::warning::dry run: built ref is ${{ steps.rel.outputs.tag }} but the app version is $VERSION"
@@ -196,7 +198,13 @@ jobs:
         shell: bash
         # The npm CLI ships a prebuilt binary — `cargo install tauri-cli` would compile it from
         # source on every cache miss (~5 min for nothing).
-        run: npm install -g "@tauri-apps/cli@^2"
+        #
+        # PINNED, like the actions. `^2` took 2.12.0 the day it was published and broke two legs at
+        # once: its new linuxdeploy stopped bundling libgmp and libpipewire (the bundle check
+        # caught it), and it stopped exporting STATIC_VCRUNTIME=true, which the locked tauri-build
+        # 2.6.3 needs for the hybrid CRT link, so rquickjs-sys no longer linked on Windows. Move it
+        # on purpose, with the tauri crates, and dry-run all three legs before a release.
+        run: npm install -g "@tauri-apps/cli@2.11.5"
 
       # libmpv is the whole reason Windows builds are a chore. The dev package ships the DLL and a
       # MinGW import lib (libmpv.dll.a) that the MSVC linker cannot consume, and no .def file — so
@@ -269,7 +277,10 @@ jobs:
           # beforeBuildCommand emptied: we just ran it. Left on, tauri runs `pnpm build` from the
           # repo root, which has no package.json, so pnpm's choice between ui/ and website/ is down
           # to the filesystem — it resolves to ui here and to website on Linux. Working by accident.
-          tauri build --config '{"build":{"beforeBuildCommand":""}}'   # → target/release/bundle/{nsis,msi}/
+          # A release candidate builds the NSIS installer only. The updater never uses the MSI, and
+          # WiX refuses a version whose prerelease suffix isn't numeric, which -rc.1 isn't.
+          BUNDLES=(); [ "$PRERELEASE" = false ] || BUNDLES=(--bundles nsis)
+          tauri build "${BUNDLES[@]}" --config '{"build":{"beforeBuildCommand":""}}'   # → target/release/bundle/{nsis,msi}/
 
       - name: Dry run — built and signed, attaching nothing
         if: ${{ inputs.dry_run }}
@@ -414,3 +425,90 @@ jobs:
             [ "$attempt" -lt 5 ] || { echo "::error::windows-x86_64 kept getting clobbered out of latest.json"; exit 1; }
             echo "the Linux job clobbered the manifest, re-merging"
           done
+
+          # Promote to "Latest" only once every platform is in the manifest.
+          #
+          # The updater resolves through /releases/latest/download/latest.json, so whatever is
+          # Latest is what every installed client reads. This block runs identically at the end of
+          # all three release workflows, and only the leg that finds all three keys present flips
+          # the flag. Which leg that is depends on who finishes last, and it does not matter.
+          #
+          # Linux used to own this flip and checked only for its own key, which promoted incomplete
+          # manifests two ways: for a few minutes while Windows or macOS was still building, since
+          # Linux usually finishes first, and for good when one of them failed outright. v0.6.6 was
+          # the second: the macOS leg failed, Linux marked the release Latest anyway, and every
+          # Mac's update check read a manifest with no darwin-aarch64 entry.
+          #
+          # If a leg never finishes, nothing flips: /releases/latest/download/latest.json keeps
+          # resolving to the previous, complete release until someone re-dispatches the failed
+          # workflow. That is deliberate. It holds back the platforms that did build (v0.7.3's Linux
+          # stall looked exactly like this, and still would), but no installed client ever reads a
+          # manifest with no entry for its platform, and the release sitting un-Latest is visible.
+          #
+          # Duplicated verbatim in linux-release.yml, windows-release.yml and macos-release.yml on
+          # purpose: a dispatched run takes the workflow from master but checks out the tag, so a
+          # shared script or composite action would come from the tag and a re-dispatch against an
+          # older one would not pick this up. Keep the three copies byte-identical.
+          #
+          # A release candidate (a version with a `-`, 1.1.0-rc.1) is never Latest, so no stable
+          # install ever reads it. What it moves instead is the beta pointer: a permanent prerelease
+          # tagged `beta` holding one latest.json, which installs on the beta channel read
+          # (`check_beta_update` in commands.rs). A complete stable release moves the pointer too when
+          # it is ahead of what the pointer holds, so beta installs land on 1.1.0 once it ships but
+          # stay on 1.1.0-rc.2 through a 1.0.3 fix. The pointer never moves backwards here, so a
+          # re-dispatch against an old tag cannot roll the beta channel back; that is done by hand
+          # (RELEASING.md §8).
+          REQUIRED_PLATFORMS='["darwin-aarch64","linux-x86_64","windows-x86_64"]'
+          retry 3 fetch_manifest final
+          HAVE="$(jq -c '.platforms | keys' final/latest.json)"
+          if [ "$HAVE" != "$REQUIRED_PLATFORMS" ]; then
+            echo "::notice::not promoting yet, latest.json carries $HAVE and needs $REQUIRED_PLATFORMS"
+            exit 0
+          fi
+          if [[ "$VERSION" == *-* ]]; then
+            echo "$TAG is a release candidate: never Latest, beta channel only"
+          else
+            retry 3 gh release edit "$TAG" --latest --repo "$GITHUB_REPOSITORY"
+            echo "All three platforms present, marked $TAG as Latest: $HAVE"
+          fi
+
+          # semver_gt A B: A ranks above B. x.y.z numerically, then a release above its own
+          # prereleases, then prerelease suffixes by version sort. `sort -V` alone gets the middle
+          # rule backwards (it puts 1.1.0-rc.1 after 1.1.0). Same function as scripts/release.sh.
+          semver_gt() {
+            [ "$1" != "$2" ] || return 1
+            local a="${1%%-*}" b="${2%%-*}"
+            if [ "$a" != "$b" ]; then
+              [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)" = "$a" ]
+              return
+            fi
+            [ "$1" != "$a" ] || return 0
+            [ "$2" != "$b" ] || return 1
+            [ "$(printf '%s\n%s\n' "${1#*-}" "${2#*-}" | sort -V | tail -1)" = "${1#*-}" ]
+          }
+          # Created once by hand (RELEASING.md §8), and scripts/release.sh refuses to run without it.
+          # An RC exists for the beta channel, so it fails without one; a stable release is complete
+          # without it and only warns.
+          if ! BETA_ID="$(retry 3 gh api "repos/$GITHUB_REPOSITORY/releases/tags/beta" --jq .id)"; then
+            if [[ "$VERSION" == *-* ]]; then
+              echo "::error::no beta release to point at $TAG, so no install can get it. Create it (RELEASING.md §8) and re-dispatch"
+              exit 1
+            fi
+            echo "::warning::no beta release, so the beta channel was not moved to $TAG"
+            exit 0
+          fi
+          # Read the pointer through the asset list, so a transient error fails the step instead of
+          # reading as "empty" and letting an older version overwrite a newer one.
+          BETA_VERSION=""
+          HAS_MANIFEST="$(retry 3 gh api "repos/$GITHUB_REPOSITORY/releases/$BETA_ID/assets" \
+            --jq '[.[] | select(.name == "latest.json")] | length')"
+          if [ "$HAS_MANIFEST" != 0 ]; then
+            (TAG=beta; retry 3 fetch_manifest beta)
+            BETA_VERSION="$(jq -r .version beta/latest.json)"
+          fi
+          if [ -z "$BETA_VERSION" ] || semver_gt "$VERSION" "$BETA_VERSION"; then
+            (RELEASE_ID="$BETA_ID"; retry 3 upload final/latest.json)
+            echo "beta channel moved to $VERSION (was ${BETA_VERSION:-empty})"
+          else
+            echo "beta channel stays on $BETA_VERSION, which is not behind $VERSION"
+          fi

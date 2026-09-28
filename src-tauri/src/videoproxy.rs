@@ -135,26 +135,31 @@ async fn handle(
 
     // The element's Range goes upstream untouched and googlevideo does the arithmetic, so there is
     // no range maths here to get wrong. Everything else the webview sent is dropped.
-    // No upstream timeout on purpose. `reqwest` 0.12 exposes `read_timeout` only on the *client*
-    // builder, and `crate::http::client()` is shared with lyrics and the orchestrator (http.rs says
-    // why it is one client), so bounding the byte gap here would change behaviour for every caller.
-    // `.timeout()` is not the substitute: it is total duration and would cut a long stream
-    // mid-track. Revisit if reqwest gains a request-level `read_timeout`.
+    // A stall guard, shared with the audio proxy. reqwest exposes `read_timeout` only on the shared
+    // client and `.timeout()` is a total deadline that would cut a long stream, but
+    // `audioproxy::no_stall` needs neither: it is a `tokio::time::timeout` around one await, so it
+    // fires on no progress. Without it a connection that goes quiet without closing hangs the
+    // <video> element with no error event, so the view neither falls back to artwork nor
+    // re-resolves: the same silent stall as issue #188.
     let mut out = crate::http::client().get(&upstream);
     if let Some(range) = req.headers().get(header::RANGE) {
         out = out.header(header::RANGE.as_str(), range);
     }
-    let upstream_resp = match out.send().await {
-        Ok(r) if r.status().is_success() => r,
+    let upstream_resp = match crate::audioproxy::no_stall(out.send()).await {
+        Ok(Ok(r)) if r.status().is_success() => r,
         // Expired URL (googlevideo links last ~6h) or a network failure. The element errors and the
         // view falls back to artwork; see plan 031's maintenance notes.
-        Ok(r) => {
+        Ok(Ok(r)) => {
             tracing::debug!(video_id, status = %r.status(), "video proxy: upstream refused");
             return Err(StatusCode::BAD_GATEWAY);
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::debug!(video_id, error = %e, "video proxy: upstream failed");
             return Err(StatusCode::BAD_GATEWAY);
+        }
+        Err(e) => {
+            tracing::debug!(video_id, error = %e, "video proxy: upstream stalled");
+            return Err(StatusCode::GATEWAY_TIMEOUT);
         }
     };
 
@@ -172,8 +177,18 @@ async fn handle(
     let body = if req.method() == Method::HEAD {
         Empty::<Bytes>::new().map_err(|e| match e {}).boxed()
     } else {
-        StreamBody::new(upstream_resp.bytes_stream().map_ok(Frame::data).map_err(io::Error::other))
-            .boxed()
+        // Each read gets the stall guard. The state goes to `None` after an error so the stream
+        // ends there instead of being polled again on a connection already given up on.
+        let chunks = upstream_resp.bytes_stream().map_ok(Frame::data).map_err(io::Error::other);
+        StreamBody::new(futures_util::stream::unfold(Some(chunks), |s| async move {
+            let mut s = s?;
+            match crate::audioproxy::no_stall(s.try_next()).await {
+                Ok(Ok(Some(frame))) => Some((Ok(frame), Some(s))),
+                Ok(Ok(None)) => None,
+                Ok(Err(e)) | Err(e) => Some((Err(e), None)),
+            }
+        }))
+        .boxed()
     };
     builder.body(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

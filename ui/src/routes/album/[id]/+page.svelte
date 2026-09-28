@@ -239,18 +239,21 @@
 {:else if album}
     <!-- Header with the blurred album cover as a hero backdrop -->
     <div class="content-in relative overflow-hidden">
-        {#if album.thumbnail}
-            <!-- Blurred backdrop: blur-2xl destroys any detail a bigger source would carry, so
-                 ask for the smallest thing that still reads as the cover's colours. -->
-            <img
-                src={thumb(album.thumbnail, 96)}
-                alt=""
-                class="absolute inset-0 h-full w-full art-wash scale-110 object-cover opacity-50 blur-2xl"
-            />
-        {/if}
-        <div
-            class="absolute inset-0 bg-gradient-to-t from-background via-background/75 to-background/40"
-        ></div>
+        <!-- The wash and its fade share one layer (`art-wash` on the wrapper): see HomeHero. -->
+        <div class="art-wash absolute inset-0 overflow-hidden">
+            {#if album.thumbnail}
+                <!-- Blurred backdrop: blur-2xl destroys any detail a bigger source would carry, so
+                     ask for the smallest thing that still reads as the cover's colours. -->
+                <img
+                    src={thumb(album.thumbnail, 96)}
+                    alt=""
+                    class="absolute inset-0 h-full w-full scale-110 object-cover opacity-50 blur-2xl"
+                />
+            {/if}
+            <div
+                class="absolute inset-0 bg-gradient-to-t from-background via-background/75 to-background/40"
+            ></div>
+        </div>
 
         <div class="absolute right-6 top-6 z-10">
             <TrackFilter bind:value={query} placeholder={t("common.search_this_album")} />
@@ -431,17 +434,16 @@
                                 /> {t("player.start_radio")}
                             </button>
                         {/if}
-                        {#if !isLocal}
-                            <button
-                                class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
-                                onclick={saveToPlaylist}
-                            >
-                                <HugeiconsIcon
-                                    icon={PlayListAddIcon}
-                                    class="h-4 w-4"
-                                /> {t("player.save_to_playlist")}
-                            </button>
-                        {/if}
+                        <!-- A local album too: files can go in a playlist on this machine. -->
+                        <button
+                            class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
+                            onclick={saveToPlaylist}
+                        >
+                            <HugeiconsIcon
+                                icon={PlayListAddIcon}
+                                class="h-4 w-4"
+                            /> {t("player.save_to_playlist")}
+                        </button>
                         <button
                             class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent/10"
                             onclick={() => {
@@ -487,7 +489,7 @@
                 showPlayCount
                 active={item.video_id === nowId}
                 onplay={() => playAll(i)}
-                onAdd={isLocal ? undefined : () => openAddManyToPlaylist([item])}
+                onAdd={() => openAddManyToPlaylist([item])}
             />
         {:else}
             <p class="p-4 text-sm text-muted-foreground">
@@ -506,7 +508,6 @@
                 <Shelf
                     title={section.title}
                     items={section.items}
-                    headingClass="font-heading text-xl font-bold"
                     onMore={section.moreBrowseId
                         ? () => showMore(section)
                         : undefined}

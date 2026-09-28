@@ -198,6 +198,10 @@ pub struct Format {
 pub struct AudioTrack {
     #[serde(default)]
     pub is_auto_dubbed: Option<bool>,
+    /// Set on the video's own language track. A dubbed video lists every language at the same
+    /// qualities, so without this the bitrate tiebreak picks one at random (#286 follow-up).
+    #[serde(default)]
+    pub audio_is_default: Option<bool>,
 }
 
 impl Format {
@@ -205,9 +209,13 @@ impl Format {
     pub fn is_audio(&self) -> bool {
         self.width.is_none()
     }
-    /// Not an auto-dubbed foreign-language track. context/03.
+    /// The video's own audio, not a dub. context/03 checks only `isAutoDubbed`, which a human dub
+    /// and some auto dubs don't carry; `audioIsDefault` marks the original on every multi-track
+    /// response seen so far. A format with no `audioTrack` is the only track there is.
     pub fn is_original(&self) -> bool {
-        self.audio_track.as_ref().and_then(|t| t.is_auto_dubbed).is_none()
+        self.audio_track
+            .as_ref()
+            .is_none_or(|t| t.is_auto_dubbed != Some(true) && t.audio_is_default == Some(true))
     }
     /// Direct, playable URL with no cipher required (present on the non-web fallback clients).
     pub fn direct_url(&self) -> Option<&str> {
@@ -285,32 +293,74 @@ pub fn select_best_audio_format<'a>(
     if valid.is_empty() {
         return None;
     }
+    let original: Vec<&'a Format> = valid.iter().copied().filter(|f| f.is_original()).collect();
+    let audio = if original.is_empty() { valid } else { original };
     match quality {
-        AudioQuality::Low => valid
+        AudioQuality::Low => {
+            let capped: Vec<&'a Format> = audio.iter().copied().filter(|f| f.bitrate <= 128_000).collect();
+            let pool = if capped.is_empty() { audio } else { capped };
+            pool.into_iter()
+                .max_by(|a, b| {
+                    a.is_original().cmp(&b.is_original()).then(a.bitrate.cmp(&b.bitrate))
+                })
+        }
+        AudioQuality::Auto | AudioQuality::High => audio.into_iter().max_by(|a, b| {
+            a.quality_rank()
+                .cmp(&b.quality_rank())
+                .then(a.audio_channels.unwrap_or(2).cmp(&b.audio_channels.unwrap_or(2)))
+                .then(a.codec_score().cmp(&b.codec_score()))
+                .then(a.bitrate.cmp(&b.bitrate))
+        }),
+        AudioQuality::Mp4 => audio
             .iter()
+            .copied()
             .filter(|f| f.mime_type.contains("audio/mp4"))
-            .min_by_key(|f| f.bitrate)
-            .or_else(|| valid.iter().min_by_key(|f| f.bitrate))
-            .copied(),
-        AudioQuality::Auto => valid
-            .iter()
-            .filter(|f| f.mime_type.contains("audio/webm"))
             .max_by_key(|f| audio_format_score(f))
-            .or_else(|| valid.iter().max_by_key(|f| audio_format_score(f)))
-            .copied(),
-        AudioQuality::High => valid.iter().max_by_key(|f| audio_format_score(f)).copied(),
-        AudioQuality::Mp4 => valid
-            .iter()
-            .filter(|f| f.mime_type.contains("audio/mp4"))
-            .max_by_key(|f| audio_format_score(f))
-            .copied(),
+            .or_else(|| audio.into_iter().max_by_key(|f| audio_format_score(f))),
     }
 }
 
-/// Pick the best audio format for the requested quality from `StreamingData`.
-/// Backwards-compatible facade calling `select_best_audio_format`.
+/// Pick the best audio format for the requested quality. Port of `YTPlayerUtils.findFormat`,
+/// context/03. Returns a reference into `adaptive_formats`, or into `formats` when there is no
+/// adaptive audio: a podcast added to the library by RSS feed is not hosted by YouTube, and WEB_REMIX
+/// answers with one progressive `audio/mpeg` entry pointing at the feed's own enclosure (#294).
 pub fn find_format(data: &StreamingData, quality: AudioQuality) -> Option<&Format> {
-    select_best_audio_format(&data.adaptive_formats, quality, false)
+    let mut audio: Vec<&Format> = data.adaptive_formats.iter().filter(|f| f.is_audio()).collect();
+    if audio.is_empty() {
+        audio = data.formats.iter().flatten().filter(|f| f.is_audio()).collect();
+    }
+    if audio.is_empty() {
+        return None;
+    }
+    // A dubbed video lists every language at the same qualities, so the original is picked
+    // before anything else: a dub is never the better stream, at any bitrate.
+    let original: Vec<&Format> = audio.iter().copied().filter(|f| f.is_original()).collect();
+    let audio = if original.is_empty() { audio } else { original };
+    match quality {
+        AudioQuality::High | AudioQuality::Auto => audio.into_iter().max_by(|a, b| {
+            a.quality_rank()
+                .cmp(&b.quality_rank())
+                .then(a.audio_channels.unwrap_or(2).cmp(&b.audio_channels.unwrap_or(2)))
+                .then(a.codec_score().cmp(&b.codec_score()))
+                .then(a.bitrate.cmp(&b.bitrate))
+        }),
+        AudioQuality::Low => {
+            let capped: Vec<&&Format> = audio.iter().filter(|f| f.bitrate <= 128_000).collect();
+            let pool = if capped.is_empty() { audio.iter().collect() } else { capped };
+            // Prefer original (non-dubbed), then highest bitrate under the cap.
+            pool.into_iter()
+                .max_by(|a, b| {
+                    a.is_original().cmp(&b.is_original()).then(a.bitrate.cmp(&b.bitrate))
+                })
+                .copied()
+        }
+        AudioQuality::Mp4 => audio
+            .iter()
+            .copied()
+            .filter(|f| f.mime_type.contains("audio/mp4"))
+            .max_by_key(|f| audio_format_score(f))
+            .or_else(|| audio.into_iter().max_by_key(|f| audio_format_score(f))),
+    }
 }
 
 /// Pick the best video format at or below `max_height`.
@@ -459,6 +509,43 @@ mod tests {
         assert_eq!(sd.expires_in_seconds, Some(21540));
         assert_eq!(sd.adaptive_formats[0].bitrate, 141210);
         assert!(find_format(&sd, AudioQuality::High).is_some());
+    }
+
+    /// A dubbed video lists each language at the same qualities; the higher-bitrate dub must not
+    /// win over the original, at either quality setting. Track shape from a live VISIONOS response.
+    #[test]
+    fn find_format_keeps_the_original_language() {
+        let json = r#"{
+            "playabilityStatus": { "status": "OK" },
+            "streamingData": { "adaptiveFormats": [
+                { "itag": 251, "url": "hi", "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 150000, "audioQuality": "AUDIO_QUALITY_MEDIUM",
+                  "audioTrack": { "displayName": "Hindi", "id": "hi.3" } },
+                { "itag": 251, "url": "en", "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 140000, "audioQuality": "AUDIO_QUALITY_MEDIUM",
+                  "audioTrack": { "displayName": "English original", "id": "en.4", "audioIsDefault": true, "isAutoDubbed": false } },
+                { "itag": 249, "url": "es", "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 90000, "audioQuality": "AUDIO_QUALITY_LOW",
+                  "audioTrack": { "displayName": "Spanish", "id": "es.3", "audioIsDefault": false, "isAutoDubbed": true } }
+            ] }
+        }"#;
+        let sd = serde_json::from_str::<PlayerResponse>(json).unwrap().streaming_data.unwrap();
+        assert_eq!(find_format(&sd, AudioQuality::High).unwrap().url.as_deref(), Some("en"));
+        assert_eq!(find_format(&sd, AudioQuality::Low).unwrap().url.as_deref(), Some("en"));
+    }
+
+    /// An RSS-feed podcast episode (#294): no adaptive formats, only the feed's own mp3 as a
+    /// progressive format. Shape from a live WEB_REMIX response.
+    #[test]
+    fn find_format_falls_back_to_a_progressive_rss_enclosure() {
+        let json = r#"{
+            "playabilityStatus": { "status": "OK" },
+            "streamingData": { "expiresInSeconds": "21540", "formats": [
+                { "itag": 15, "url": "https://www.podtrac.com/pts/redirect.mp3/x.mp3", "mimeType": "audio/mpeg",
+                  "contentLength": "0", "approxDurationMs": "5656000",
+                  "audioTrack": { "displayName": "Ep. 079", "audioIsDefault": true } }
+            ] }
+        }"#;
+        let sd = serde_json::from_str::<PlayerResponse>(json).unwrap().streaming_data.unwrap();
+        assert_eq!(find_format(&sd, AudioQuality::High).unwrap().itag, 15);
+        assert_eq!(find_format(&sd, AudioQuality::Low).unwrap().itag, 15);
     }
 
     /// Video-only picker (plan 031): VP9 only, capped by height, 60fps preferred over the 30fps

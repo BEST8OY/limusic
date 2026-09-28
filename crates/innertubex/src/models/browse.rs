@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::metadata::{
-    artist_runs, artists_from_runs, duration_from_runs, find_all, find_all_shallow, find_first_str,
-    first_artist_id, flex_column_text, flex_runs, is_explicit, is_upload_endpoint, is_upload_row,
-    is_video_endpoint, is_video_row, is_video_type, last_thumbnail, list_item_video_id,
-    parse_list_item, play_count, runs_text, runs_text_opt, ArtistRun, SongItem,
+    album_id, artist_runs, artists_from_runs, duration_from_runs, find_all, find_all_shallow,
+    find_first_str, first_artist_id, flex_column_text, flex_runs, is_explicit, is_upload_endpoint,
+    is_upload_row, is_video_endpoint, is_video_row, is_video_type, last_thumbnail,
+    list_item_video_id, parse_episode_item, parse_list_item, play_count, runs_text, runs_text_opt,
+    ArtistRun, SongItem,
 };
 
 /// One clickable card in a home carousel or library grid. Flat + `kind`-tagged so the UI can
@@ -36,6 +37,10 @@ pub struct BrowseItem {
     /// of `subtitle` so the queue and the scrobbler still get a clean artist string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
+    /// Song cards only: the track's album (`MPRE…`), carried into the SongItem a played card
+    /// becomes. Without it the ⋯ menu and the player bar offer no "Go to album" (issue #253).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<String>,
     /// The `subtitle` artist line run by run, each tagged with its channel id when it links one.
     /// On a song card it is carried so a card that gets played (search rows, home shelves) reaches
     /// the player bar with the same navigable artists a track row has; on an album or playlist card
@@ -340,6 +345,51 @@ pub fn parse_home(root: &Value) -> HomePage {
     HomePage { chips, sections, continuation: continuation_token(root) }
 }
 
+/// One tile of Moods & Genres (`musicNavigationButtonRenderer`): a label, the `params` that browse
+/// `FEmusic_moods_and_genres_category` into that mood's playlists, and YouTube's own colour for it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Mood {
+    pub title: String,
+    pub params: String,
+    /// `#rrggbb`, from the tile's `leftStripeColor` (ARGB, alpha always opaque).
+    pub color: String,
+}
+
+/// A titled grid of mood tiles ("Moods & moments", "Genres"), in YouTube's order and language.
+#[derive(Debug, Clone, Serialize)]
+pub struct MoodSection {
+    pub title: String,
+    pub items: Vec<Mood>,
+}
+
+/// Parse a `FEmusic_moods_and_genres` response: one `gridRenderer` per section. context/08.
+pub fn parse_moods(root: &Value) -> Vec<MoodSection> {
+    find_all(root, "gridRenderer")
+        .into_iter()
+        .filter_map(|grid| {
+            let title = find_all(grid.get("header")?, "gridHeaderRenderer")
+                .into_iter()
+                .find_map(|h| runs_text(h.get("title")))?;
+            let items: Vec<Mood> = find_all(grid.get("items")?, "musicNavigationButtonRenderer")
+                .into_iter()
+                .filter_map(|b| {
+                    let params = find_all(b.get("clickCommand")?, "browseEndpoint")
+                        .into_iter()
+                        .find_map(|e| e.get("params")?.as_str())?
+                        .to_owned();
+                    let argb = b.get("solid")?.get("leftStripeColor")?.as_u64()?;
+                    Some(Mood {
+                        title: runs_text(b.get("buttonText"))?,
+                        params,
+                        color: format!("#{:06x}", argb & 0xff_ffff),
+                    })
+                })
+                .collect();
+            (!items.is_empty()).then_some(MoodSection { title, items })
+        })
+        .collect()
+}
+
 /// One date bucket of the play history ("Today", "Yesterday", "This week"). context/08.
 #[derive(Debug, Clone, Serialize)]
 pub struct HistoryGroup {
@@ -399,9 +449,7 @@ pub fn parse_playlist(root: &Value) -> PlaylistPage {
     // thumbnails array it reaches first, so a header with only a `straplineThumbnail` would hand
     // every row the artist avatar. Issue #160.
     let cover = header.and_then(|h| h.get("thumbnail")).and_then(last_thumbnail);
-    let items = find_all_shallow(root, "musicResponsiveListItemRenderer")
-        .into_iter()
-        .filter_map(parse_list_item)
+    let items = playlist_rows(root, title.as_deref())
         .map(|mut it| {
             if it.thumbnail.is_none() {
                 it.thumbnail = cover.clone();
@@ -464,14 +512,30 @@ fn selected_sort(item: &Value) -> Option<PlaylistSort> {
     PlaylistSort::from_params(&urlencoding::decode(params).ok()?)
 }
 
+/// A playlist page's rows: tracks, or podcast episodes on a show page / Saved Episodes (#286).
+/// Shallow find: on an owned/editable playlist each track row embeds a nested copy of its own
+/// renderer (an add-suggestion edit command), so a deep find_all would return every track twice.
+/// An episode row names no show, so it takes `show` (the page title) as its artist.
+fn playlist_rows<'a>(
+    root: &'a Value,
+    show: Option<&'a str>,
+) -> impl Iterator<Item = SongItem> + 'a {
+    let tracks = find_all_shallow(root, "musicResponsiveListItemRenderer");
+    let episodes = find_all_shallow(root, "musicMultiRowListItemRenderer");
+    tracks.into_iter().filter_map(parse_list_item).chain(
+        episodes.into_iter().filter_map(parse_episode_item).map(move |mut it| {
+            if it.artists.is_empty() {
+                it.artists = show.unwrap_or_default().to_owned();
+            }
+            it
+        }),
+    )
+}
+
 /// Parse a browse continuation response (more playlist tracks). context/08.
 pub fn parse_playlist_continuation(root: &Value) -> PlaylistContinuation {
-    // Shallow find: on an owned/editable playlist each track row embeds a nested copy of its own
-    // renderer (an add-suggestion edit command), so a deep find_all would return every track twice.
-    let items = find_all_shallow(root, "musicResponsiveListItemRenderer")
-        .into_iter()
-        .filter_map(parse_list_item)
-        .collect();
+    // ponytail: no header here, so episodes past the first page go without a show name.
+    let items = playlist_rows(root, None).collect();
     // A continuation response is mostly shelf already; the sweep stays as the fallback for the
     // `…ShelfContinuation` shapes that carry no `…ShelfRenderer` node to scope to.
     PlaylistContinuation {
@@ -564,6 +628,7 @@ fn list_item_to_browse_item(node: &Value) -> Option<BrowseItem> {
             subtitle,
             thumbnail,
             duration: None,
+            album_id: None,
             artist_runs: Vec::new(),
             play_count: None,
             is_video: false,
@@ -583,6 +648,7 @@ fn list_item_to_browse_item(node: &Value) -> Option<BrowseItem> {
         subtitle,
         thumbnail,
         duration: duration_from_runs(runs),
+        album_id: album_id(node),
         artist_runs: runs.map(|r| artist_runs(r)).unwrap_or_default(),
         play_count: play_count(node),
         is_video: is_video_row(node),
@@ -619,6 +685,9 @@ fn card_shelf_main(card: &Value) -> Option<BrowseItem> {
             subtitle,
             thumbnail,
             duration: duration_from_runs(runs),
+            // The card's own menu only: the card also holds its related rows, and a search of
+            // the whole node would hand back one of their albums.
+            album_id: card.get("menu").and_then(album_id),
             artist_runs: runs.map(|r| artist_runs(r)).unwrap_or_default(),
             play_count: None,
             is_video: nav.is_some_and(is_video_endpoint),
@@ -638,6 +707,7 @@ fn card_shelf_main(card: &Value) -> Option<BrowseItem> {
         subtitle,
         thumbnail,
         duration: None,
+        album_id: None,
         artist_runs: Vec::new(),
         play_count: None,
         is_video: false,
@@ -909,28 +979,30 @@ pub(crate) fn is_signed_out(root: &Value) -> bool {
 
 // --- node parsers -------------------------------------------------------------------------
 
-/// A carousel content node is either a two-row card or a track row.
+/// A carousel content node is a two-row card, a track row, or a podcast episode (the home
+/// Podcasts feed, #286).
 fn parse_carousel_item(node: &Value) -> Option<BrowseItem> {
     if let Some(tr) = node.get("musicTwoRowItemRenderer") {
         return parse_two_row_item(tr);
     }
-    if let Some(li) = node.get("musicResponsiveListItemRenderer") {
-        let song = parse_list_item(li)?;
-        return Some(BrowseItem {
-            kind: "song",
-            id: song.video_id,
-            title: song.title,
-            subtitle: Some(song.artists).filter(|s| !s.is_empty()),
-            thumbnail: song.thumbnail,
-            duration: song.duration,
-            artist_runs: song.artist_runs,
-            play_count: song.play_count,
-            is_video: song.is_video,
-            is_upload: song.is_upload,
-            explicit: song.explicit,
-        });
-    }
-    None
+    let song = node
+        .get("musicResponsiveListItemRenderer")
+        .and_then(parse_list_item)
+        .or_else(|| node.get("musicMultiRowListItemRenderer").and_then(parse_episode_item))?;
+    Some(BrowseItem {
+        kind: "song",
+        id: song.video_id,
+        title: song.title,
+        subtitle: Some(song.artists).filter(|s| !s.is_empty()),
+        thumbnail: song.thumbnail,
+        duration: song.duration,
+        album_id: song.album_id,
+        artist_runs: song.artist_runs,
+        play_count: song.play_count,
+        is_video: song.is_video,
+        is_upload: song.is_upload,
+        explicit: song.explicit,
+    })
 }
 
 /// A `musicTwoRowItemRenderer` → one card. Kind inferred from its navigation endpoint.
@@ -959,6 +1031,7 @@ fn parse_two_row_item(node: &Value) -> Option<BrowseItem> {
             subtitle,
             thumbnail,
             duration: duration_from_runs(runs),
+            album_id: album_id(node),
             artist_runs: runs.map(|r| artist_runs(r)).unwrap_or_default(),
             play_count: None,
             is_video: is_video_row(node),
@@ -979,6 +1052,7 @@ fn parse_two_row_item(node: &Value) -> Option<BrowseItem> {
             subtitle,
             thumbnail,
             duration: None,
+            album_id: None,
             artist_runs: Vec::new(),
             play_count: None,
             is_video: false,
@@ -1004,6 +1078,7 @@ fn parse_two_row_item(node: &Value) -> Option<BrowseItem> {
         subtitle,
         thumbnail,
         duration: None,
+        album_id: None,
         artist_runs: runs.map(|r| artist_runs(r)).unwrap_or_default(),
         play_count: None,
         is_video: false,
@@ -1030,6 +1105,17 @@ fn browse_kind_from_id(id: &str) -> &'static str {
 fn browse_target(id: &str) -> (&'static str, String) {
     let id = id.strip_prefix("MPLA").unwrap_or(id);
     (browse_kind_from_id(id), id.to_owned())
+}
+
+/// A podcast opened by its playlist id (`VLPL…`, e.g. from a pasted `playlist?list=` link) lists
+/// its episodes with no header at all: no title, no artwork. The show page (`MPSP` + the same id)
+/// carries both, so this names it for a second fetch (#294).
+pub(crate) fn podcast_show_id(browse_id: &str, root: &Value) -> Option<String> {
+    let id = browse_id.strip_prefix("VL")?;
+    let episodes = find_all(root, "musicVideoType")
+        .iter()
+        .any(|t| t.as_str() == Some("MUSIC_VIDEO_TYPE_PODCAST_EPISODE"));
+    (episodes && playlist_header(root).is_none()).then(|| format!("MPSP{id}"))
 }
 
 /// The playlist/album header node — recursion finds the detail renderer even when it's wrapped in
@@ -1206,7 +1292,9 @@ mod tests {
                                     "text": { "runs": [{ "text": "Old Song" }] } } },
                                 { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
                                     { "text": "The Artist" }, { "text": " • " },
-                                    { "text": "The Album" }, { "text": " • " }, { "text": "3:47" }
+                                    { "text": "The Album", "navigationEndpoint": {
+                                        "browseEndpoint": { "browseId": "MPREb_old" } } },
+                                    { "text": " • " }, { "text": "3:47" }
                                 ] } } }
                             ]
                         } }
@@ -1252,6 +1340,8 @@ mod tests {
         assert_eq!(song.id, "vid123");
         assert_eq!(song.subtitle.as_deref(), Some("The Artist"));
         assert_eq!(song.duration.as_deref(), Some("3:47"));
+        // Dropping it here left Quick picks without "Go to album" (issue #253).
+        assert_eq!(song.album_id.as_deref(), Some("MPREb_old"));
         assert_eq!(home.continuation.as_deref(), Some("HOME_MORE"));
     }
 
@@ -2036,5 +2126,129 @@ mod tests {
         let root = json!({ "musicPlaylistShelfRenderer": { "contents": [] } });
         assert!(sort_menu(&root).is_none());
         assert!(parse_playlist(&root).sort_menu.is_none());
+    }
+
+    // A podcast show page (`MPSP…`) lists its episodes as multi-row items, not track rows; reading
+    // only the latter left every show empty (#286). Shape trimmed from a live response 2026-09-22.
+    #[test]
+    fn parses_podcast_episodes_on_a_show_page() {
+        let play = |id: &str| {
+            json!({ "watchEndpoint": { "videoId": id, "watchEndpointMusicSupportedConfigs": {
+                "watchEndpointMusicConfig": { "musicVideoType": "MUSIC_VIDEO_TYPE_PODCAST_EPISODE" } } } })
+        };
+        let episode = |id: &str, title: &str, length: &str| {
+            json!({ "musicMultiRowListItemRenderer": {
+                "thumbnail": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [
+                    { "url": format!("https://i.ytimg.com/vi/{id}/hq720.jpg") } ] } } },
+                "overlay": { "musicItemThumbnailOverlayRenderer": { "content": {
+                    "musicPlayButtonRenderer": { "playNavigationEndpoint": play(id) } } } },
+                "onTap": play(id),
+                "title": { "runs": [{ "text": title }] },
+                "subtitle": { "runs": [{ "text": "48 views" }, { "text": " \u{2022} " }, { "text": "Apr 23, 2021" }] },
+                "playbackProgress": { "musicPlaybackProgressRenderer": {
+                    "durationText": { "runs": [{ "text": " \u{2022} " }, { "text": length }] } } }
+            } })
+        };
+        let root = json!({
+            "header": { "musicResponsiveHeaderRenderer": { "title": { "runs": [{ "text": "Lemonade Stand" }] } } },
+            "contents": { "musicShelfRenderer": { "contents": [
+                episode("xOXghljqUGw", "Ep. 5 We're Live!", "55 min"),
+                episode("LWEIDnrEl0A", "Ep. 4 Would You Rather", "1 hr 4 min"),
+            ] } }
+        });
+        let page = parse_playlist(&root);
+        let rows: Vec<_> =
+            page.items.iter().map(|s| (s.video_id.as_str(), s.duration.as_deref())).collect();
+        assert_eq!(rows, [("xOXghljqUGw", Some("55:00")), ("LWEIDnrEl0A", Some("1:04:00"))]);
+        let first = &page.items[0];
+        assert_eq!(first.title, "Ep. 5 We're Live!");
+        assert_eq!(first.artists, "Lemonade Stand");
+        assert!(!first.is_video, "\"hide music videos\" would drop every episode");
+        assert!(first.thumbnail.as_deref().unwrap().contains("xOXghljqUGw"));
+        // A continuation has no header, so no show name, but the rows still come through.
+        assert_eq!(parse_playlist_continuation(&root).items.len(), 2);
+    }
+
+    // A show opened as `VLPL…` has episode rows but no header; the `MPSP` page has one (#294).
+    #[test]
+    fn a_headerless_podcast_playlist_points_at_its_show_page() {
+        let row = json!({ "musicResponsiveListItemRenderer": { "overlay": { "musicItemThumbnailOverlayRenderer": {
+            "content": { "musicPlayButtonRenderer": { "playNavigationEndpoint": { "watchEndpoint": {
+                "videoId": "kNmVirXA1po",
+                "watchEndpointMusicSupportedConfigs": { "watchEndpointMusicConfig": {
+                    "musicVideoType": "MUSIC_VIDEO_TYPE_PODCAST_EPISODE" } } } } } } } } } });
+        let bare = json!({ "contents": { "musicPlaylistShelfRenderer": { "contents": [row] } } });
+        assert_eq!(podcast_show_id("VLPLabc", &bare).as_deref(), Some("MPSPPLabc"));
+        assert_eq!(podcast_show_id("MPSPPLabc", &bare), None, "already the show page");
+
+        let mut headed = bare.clone();
+        headed["header"] = json!({ "musicResponsiveHeaderRenderer": { "title": { "runs": [{ "text": "Show" }] } } });
+        assert_eq!(podcast_show_id("VLPLabc", &headed), None);
+
+        let music = json!({ "contents": { "musicPlaylistShelfRenderer": { "contents": [] } } });
+        assert_eq!(podcast_show_id("VLPLabc", &music), None, "an ordinary headerless list");
+    }
+
+    // The home feed's Podcasts chip returns carousels of the same episode rows, which name their
+    // show in `secondTitle`. Before #286 they parsed to nothing and every shelf was dropped.
+    #[test]
+    fn parses_podcast_episodes_on_the_home_feed() {
+        let root = json!({ "musicCarouselShelfRenderer": {
+            "header": { "musicCarouselShelfBasicHeaderRenderer": { "title": { "runs": [{ "text": "Business" }] } } },
+            "contents": [{ "musicMultiRowListItemRenderer": {
+                "thumbnail": { "musicThumbnailRenderer": { "thumbnail": { "thumbnails": [{ "url": "https://i.ytimg.com/vi/abc/hq720.jpg" }] } } },
+                "onTap": { "watchEndpoint": { "videoId": "abc" } },
+                "title": { "runs": [{ "text": "Episode 12" }] },
+                "secondTitle": { "runs": [{ "text": "The Show", "navigationEndpoint": { "browseEndpoint": { "browseId": "MPSPPLxyz" } } }] }
+            } }]
+        } });
+        let home = parse_home(&root);
+        let card = &home.sections[0].items[0];
+        assert_eq!(
+            (card.kind, card.id.as_str(), card.title.as_str()),
+            ("song", "abc", "Episode 12")
+        );
+        assert_eq!(card.subtitle.as_deref(), Some("The Show"));
+    }
+
+    #[test]
+    fn parses_moods_grid() {
+        let tile = |text: &str, color: u64, params: &str| {
+            json!({ "musicNavigationButtonRenderer": {
+                "buttonText": { "runs": [{ "text": text }] },
+                "solid": { "leftStripeColor": color },
+                "clickCommand": { "browseEndpoint": {
+                    "browseId": "FEmusic_moods_and_genres_category", "params": params
+                } }
+            } })
+        };
+        let root = json!({ "contents": { "sectionListRenderer": { "contents": [
+            { "gridRenderer": {
+                "header": { "gridHeaderRenderer": { "title": { "runs": [{ "text": "Moods & moments" }] } } },
+                "items": [tile("Chill", 4288988671, "P_CHILL"), tile("Gaming", 4284506208, "P_GAME")]
+            } },
+            { "gridRenderer": {
+                "header": { "gridHeaderRenderer": { "title": { "runs": [{ "text": "Genres" }] } } },
+                // No colour → dropped rather than drawn in a guessed one.
+                "items": [tile("Jazz", 4288988671, "P_JAZZ"), json!({ "musicNavigationButtonRenderer": {
+                    "buttonText": { "runs": [{ "text": "Bare" }] },
+                    "clickCommand": { "browseEndpoint": { "params": "P_BARE" } }
+                } })]
+            } }
+        ] } } });
+        let s = parse_moods(&root);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].title, "Moods & moments");
+        assert_eq!(
+            (
+                s[0].items[0].title.as_str(),
+                s[0].items[0].params.as_str(),
+                s[0].items[0].color.as_str()
+            ),
+            ("Chill", "P_CHILL", "#a4c5ff")
+        );
+        assert_eq!(s[0].items[1].color, "#606060");
+        assert_eq!(s[1].items.len(), 1);
+        assert_eq!(s[1].items[0].title, "Jazz");
     }
 }

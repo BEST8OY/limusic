@@ -21,7 +21,7 @@
 		"songs": "Músicas",
 		"albums": "Álbuns",
 		"artists": "Artistas",
-		"playlists": "Playlists",
+		"playlists": "Listas de reprodução",
 		"song_singular": "Música",
 		"album_singular": "Álbum",
 		"artist_singular": "Artista",
@@ -60,7 +60,11 @@
 		"filter_library": "Filtrar sua biblioteca…",
 		"command_description": "Buscar músicas, álbuns, artistas e playlists",
 		"shuffle_all": "Tocar tudo aleatoriamente",
-		"play_all": "Tocar tudo"
+		"play_all": "Tocar tudo",
+		"top_result": "Melhor resultado",
+		"all_results_for": "Todos os resultados para “{query}”",
+		"refresh": "Atualizar",
+		"videos": "Vídeos"
 	},
 	"nav": {
 		"home": "Início",
@@ -71,7 +75,7 @@
 		"new_playlist": "Nova playlist",
 		"account": "Conta",
 		"sign_in": "Entrar",
-		"sign_out": "Sair",
+		"sign_out": "Sair da conta",
 		"switch_channel": "Trocar de canal",
 		"choose_channel": "Escolha um canal do YouTube",
 		"choose_channel_desc": "Biblioteca, curtidas e playlists usarão este canal. Você pode trocar novamente depois.",
@@ -82,7 +86,8 @@
 		"remove_account": "Remover conta",
 		"remove_account_title": "Remover do Limusic?",
 		"remove_account_desc": "{name} é removida apenas desta lista. A conta do Google em si não é afetada, e você pode fazer login com ela novamente quando quiser.",
-		"saved_accounts_hint": "Selecione uma conta salva para alternar."
+		"saved_accounts_hint": "Selecione uma conta salva para alternar.",
+		"no_channels": "O YouTube não retornou nenhum canal selecionável."
 	},
 	"player": {
 		"play": "Tocar",
@@ -136,7 +141,8 @@
 		"add_to_playlist": "Adicionar à playlist",
 		"pin_to_top": "Fixar no topo",
 		"unpin": "Desafixar",
-		"block_artist": "Bloquear artista"
+		"block_artist": "Bloquear artista",
+		"remove_from_this_playlist": "Remover desta playlist"
 	},
 	"home": {
 		"good_morning": "Bom dia",
@@ -154,7 +160,8 @@
 		"show_section": "Mostrar {title} no início",
 		"hide_section": "Ocultar {title} do início",
 		"feed_empty": "Seu feed inicial veio vazio desta vez.",
-		"signed_out_hint": "Entre e o início se enche de mixes e playlists feitos a partir do que você ouve."
+		"signed_out_hint": "Entre e o início se enche de mixes e playlists feitos a partir do que você ouve.",
+		"add_to_end": "Adicionar ao final"
 	},
 	"artist": {
 		"subscribe": "Inscrever-se",
@@ -196,7 +203,18 @@
 		"every_upload": "Todas as faixas que você enviou para o YouTube Music",
 		"no_uploads": "Nada enviado ainda. Músicas que você envia em music.youtube.com aparecem aqui.",
 		"uploads_signed_out": "Entre para ver as músicas que você enviou para o YouTube Music.",
-		"no_upload_albums": "Nenhum álbum enviado ainda. Os álbuns que você enviar em music.youtube.com aparecerão aqui."
+		"no_upload_albums": "Nenhum álbum enviado ainda. Os álbuns que você enviar em music.youtube.com aparecerão aqui.",
+		"songs_signed_out": "Faça login para ver as músicas salvas na sua biblioteca do YouTube Music. As músicas neste dispositivo estão na aba Local.",
+		"no_library_songs": "Ainda não há músicas na sua biblioteca. Toque no ⋯ de uma música e salve ou curta. Ela aparecerá aqui.",
+		"empty_signed_out": "Ainda não há nada salvo. Abra uma playlist ou um álbum e toque em Salvar na biblioteca, ou faça login para acessar a biblioteca da sua conta.",
+		"empty": "Sua biblioteca está vazia.",
+		"no_saved_playlists": "Ainda não há playlists. Abra uma e toque em Salvar na biblioteca para mantê-la aqui.",
+		"no_saved_albums": "Ainda não há álbuns salvos. Abra um álbum e toque em Salvar na biblioteca.",
+		"no_saved_artists": "Ainda não há artistas. Salve um na página dele para mantê-lo aqui.",
+		"no_artists": "Ainda não há artistas. Eles aparecem aqui assim que você salva músicas ou álbuns deles.",
+		"on_repeat": "Em Repetição",
+		"on_repeat_subtitle": "{count} músicas que você mais ouviu neste mês",
+		"songs_count": "{count} músicas"
 	},
 	"local": {
 		"scanning": "Verificando pasta...",
@@ -206,7 +224,11 @@
 		"artists_count": "Artistas ({count})",
 		"songs_count": "Músicas ({count})",
 		"add_folder": "Adicionar pasta",
-		"pick_folder_dialog": "Adicionar pasta de músicas"
+		"pick_folder_dialog": "Adicionar pasta de músicas",
+		"folders": "Pastas",
+		"folders_hint": "As músicas nestas pastas tocam sem conexão com a internet.",
+		"no_folders": "Ainda não há pastas. Adicione a pasta onde estão suas músicas e ela aparecerá aqui.",
+		"nothing_playable": "Nenhum arquivo reproduzível encontrado nessas pastas ainda. Busque por arquivos: mp3, flac, m4a, aac, ogg, opus, wav, wma, aiff, ape, wv e mka."
 	},
 	"settings": {
 		"title": "Configurações",
@@ -220,7 +242,11 @@
 			"data": "Dados e armazenamento",
 			"data_hint": "Rede e arquivos em cache.",
 			"about": "Sobre",
-			"about_hint": "Versão, atualizações e novidades."
+			"about_hint": "Versão, atualizações e novidades.",
+			"discord": "Discord",
+			"discord_hint": "Como fica a exibição do seu Rich Presence.",
+			"hotkeys": "Atalhos globais",
+			"hotkeys_hint": "Atalhos globais para controlar a reprodução."
 		},
 		"sections": {
 			"language": "Idioma",
@@ -239,7 +265,12 @@
 			"report": "Reportar problema",
 			"whats_new": "Novidades",
 			"blocked": "Artistas bloqueados",
-			"support": "Apoiar"
+			"support": "Apoiar",
+			"discord_status": "Status",
+			"discord_card": "Painel",
+			"discord_links": "Clicável",
+			"discord_buttons": "Botões",
+			"scrobbling": "Scrobbling"
 		},
 		"general": {
 			"language": "Idioma da interface",
@@ -262,15 +293,12 @@
 			"system_titlebar_hint": "Deixe sua área de trabalho desenhar a moldura e os botões da janela. O Limusic mantém sua própria barra de ferramentas abaixo dela."
 		},
 		"themes": {
-			"accent_themes": "Temas de destaque",
 			"interface_font": "Fonte da interface",
 			"load_font_file": "Carregar fonte de um arquivo",
 			"custom_colors": "Cores personalizadas",
 			"primary_color": "Cor de destaque",
 			"background_color": "Fundo",
 			"reset_theme": "Restaurar tema padrão",
-			"accent_colors": "Cores de destaque",
-			"palettes": "Paletas",
 			"your_fonts": "Suas fontes",
 			"custom_font": "Personalizada…",
 			"font_placeholder": "Fonte instalada neste computador, ex.: Inter",
@@ -299,10 +327,12 @@
 			"font_filter": "Fontes",
 			"experimental": "Experimental",
 			"app_icon": "Ícone do aplicativo",
-			"app_icon_hint": "Um PNG substitui o ícone na barra de tarefas, na área de notificação e nesta janela. Os atalhos e o gerenciador de arquivos mantêm o ícone instalado.",
+			"app_icon_hint": "Um PNG substitui o ícone na barra de tarefas, na área de notificação, nesta janela e no Alt+Tab. Os atalhos, o gerenciador de arquivos e o botão da barra de tarefas do Windows mantêm o ícone instalado.",
 			"app_icon_pick": "Escolher…",
 			"app_icon_dialog": "Escolha um ícone do aplicativo",
-			"app_icon_filter": "Imagem PNG"
+			"app_icon_filter": "Imagem PNG",
+			"zoom": "Escala da interface",
+			"zoom_hint": "Redimensiona tudo na janela. Os atalhos de zoom também alteram a escala, e ela fica salva ao reabrir o app."
 		},
 		"playback": {
 			"audio_quality": "Qualidade de áudio",
@@ -329,7 +359,18 @@
 			"blocked_artists_remove": "Desbloquear {name}",
 			"blocked_artists_show_all": "Mostrar todos os {count}",
 			"blocked_artists_show_less": "Mostrar menos",
-			"blocked_artists_copy": "Copiar JSON"
+			"blocked_artists_copy": "Copiar JSON",
+			"lastfm_primary_artist": "Incluir apenas o artista principal no scrobble",
+			"lastfm_primary_artist_hint": "Envia apenas o primeiro artista creditado ao Last.fm, para que suas reproduções sejam registradas na página do artista correto. Nomes unidos por \"&\" são mantidos inteiros.",
+			"lastfm_primary_strict": "Descartar também artistas unidos por \"&\"",
+			"lastfm_primary_strict_hint": "\"Future & Metro Boomin\" é registrado como \"Future\". Duplas com \"&\" no nome também são encurtadas.",
+			"crossfade": "Crossfade",
+			"crossfade_hint": "Faz o final de cada faixa entrar suavemente no início da próxima. Durante a sobreposição das faixas, executa um segundo decodificador de áudio, o que consome um pouco mais de memória.",
+			"crossfade_duration": "Duração do crossfade",
+			"crossfade_duration_hint": "Quanto tempo dura a sobreposição. Faixas curtas têm um fade mais curto, para que um fade nunca comece antes que o anterior tenha terminado.",
+			"crossfade_seconds": "{secs}s",
+			"normalize_volume": "Normalização de volume",
+			"normalize_volume_hint": "Nivela o volume de reprodução das faixas, para que uma masterização mais baixa não seja abafada pela seguinte. Desative para ouvir cada faixa exatamente como foi masterizada."
 		},
 		"data": {
 			"clear_cache": "Limpar cache de imagens e streams",
@@ -361,6 +402,99 @@
 			"kofi": "Me pague um café",
 			"kofi_hint": "O Limusic é gratuito e continuará assim. O Ko-fi está à disposição caso você queira dar uma força.",
 			"kofi_button": "Abrir Ko-fi"
+		},
+		"discord": {
+			"enable": "Rich Presence",
+			"enable_hint": "Mostra a música em reprodução no seu perfil do Discord.",
+			"off_notice": "O Rich Presence está desativado, então isso não aparece no seu perfil. A prévia ainda acompanha suas alterações.",
+			"show_paused": "Mostrar quando pausado",
+			"show_paused_hint": "Mantém o painel visível enquanto a música está pausada. O Discord não tem um estado de pausa, então a barra de progresso é removida em vez de continuar avançando.",
+			"hide_details": "Esconder detalhes",
+			"hide_details_hint": "Informa apenas que uma música está tocando. Nenhum detalhe como título, artista, álbum, capa, barra de progresso ou botões sai do seu dispositivo.",
+			"status_line": "Texto do status",
+			"status_line_hint": "O que o Discord mostra ao lado do seu nome na lista de membros. O painel do perfil abaixo sempre mostra o nome do app.",
+			"status_app": "Nome da aplicação",
+			"status_line1": "Linha 1",
+			"status_line2": "Linha 2",
+			"app_name": "Nome da aplicação",
+			"app_name_hint": "Substitui \"Limusic\" onde quer que o nome do app apareça. Deixe em branco para mantê-lo.",
+			"app_name_placeholder": "Limusic",
+			"line1": "Linha 1",
+			"line1_hint": "A linha em negrito, logo abaixo do cabeçalho.",
+			"line2": "Linha 2",
+			"line2_hint": "A linha menor, logo abaixo da anterior.",
+			"content_title": "Título da música",
+			"content_artist": "Artista",
+			"content_album": "Álbum",
+			"content_artist_album": "Artista e álbum",
+			"content_off": "Escondido",
+			"cover": "Capa do álbum",
+			"cover_hint": "Mostra a capa ao lado da música.",
+			"badge": "Selo do provedor",
+			"badge_hint": "Marca a capa com um pequeno ícone do Limusic, como fazem os painéis do Spotify e do Apple Music.",
+			"line3": "Linha 3",
+			"line3_hint": "A última linha. O Discord também a usa como texto ao passar o mouse sobre a capa, então a capa do álbum precisa estar ativada.",
+			"timestamps": "Barra de progresso",
+			"timestamps_hint": "Mostra o tempo decorrido e o restante abaixo da música.",
+			"links_hint": "Transforma uma parte do painel em link. O Discord abre o link no YouTube Music, e o destino acompanha o que essa parte exibe: uma linha com o álbum abre o álbum.",
+			"link_line1": "Linha 1 é clicável",
+			"link_line2": "Linha 2 é clicável",
+			"link_cover": "Capa do álbum é clicável",
+			"button1": "Primeiro botão",
+			"button2": "Segundo botão",
+			"buttons_hint": "O Discord mostra no máximo dois botões, e nunca no seu próprio perfil: apenas outras pessoas os veem. Um botão cujo destino não tem link disponível para a música atual é ignorado.",
+			"button_listen": "Ouvir no YouTube Music",
+			"button_album": "Visualizar álbum",
+			"button_artist": "Visualizar artista",
+			"button_app": "Obter Limusic",
+			"button_off": "Nada",
+			"preview": "Prévia",
+			"preview_live": "Está tocando",
+			"preview_sample": "Música de exemplo",
+			"preview_paused": "Pausado, por isso não aparece no seu perfil no momento. Ative \"Mostrar quando pausado\" para mantê-lo visível.",
+			"reset": "Redefinir para o padrão",
+			"preview_status": "Lista de membros",
+			"preview_you": "Você",
+			"preview_card": "Painel do perfil"
+		},
+		"hotkeys": {
+			"title": "Atalhos globais",
+			"description": "Controle a reprodução com atalhos de teclado personalizáveis, mesmo com o Limusic minimizado ou em segundo plano.",
+			"enable": "Ativar atalhos globais",
+			"enable_hint": "Os atalhos globais estão desativados. Ative-os para detectar atalhos em todo o sistema.",
+			"off": "Desativado",
+			"rebind": "Alterar atalho",
+			"recording": "Segure uma tecla modificadora e pressione uma tecla...",
+			"wayland_hint": "Pode não funcionar no GNOME (Wayland).",
+			"clear": "Limpar atalho",
+			"reset": "Redefinir para o padrão",
+			"conflict": "Este atalho já está atribuído a \"{action}\"",
+			"failed_register": "Não foi possível registrar o atalho no sistema (pode estar em uso por outro aplicativo)",
+			"section_playback": "Reprodução",
+			"section_audio": "Áudio",
+			"section_window": "Janela",
+			"action_play_pause": "Reproduzir / Pausar",
+			"action_play_pause_hint": "Alterna entre reprodução e pausa.",
+			"action_next_track": "Próxima faixa",
+			"action_next_track_hint": "Pula para a próxima música na fila.",
+			"action_prev_track": "Faixa anterior",
+			"action_prev_track_hint": "Volta para a música anterior na fila.",
+			"action_volume_up": "Aumentar volume",
+			"action_volume_up_hint": "Aumenta o volume de reprodução em 5%.",
+			"action_volume_down": "Diminuir volume",
+			"action_volume_down_hint": "Diminui o volume de reprodução em 5%.",
+			"action_mute_toggle": "Silenciar / Reativar som",
+			"action_mute_toggle_hint": "Alterna entre o som silenciado e o volume anterior.",
+			"action_seek_forward": "Avançar",
+			"action_seek_forward_hint": "Avança 10 segundos na faixa.",
+			"action_seek_backward": "Retroceder",
+			"action_seek_backward_hint": "Retrocede 10 segundos na faixa.",
+			"action_toggle_shuffle": "Alternar ordem aleatória",
+			"action_toggle_shuffle_hint": "Ativa ou desativa a ordem aleatória da fila.",
+			"action_toggle_repeat": "Alternar repetição",
+			"action_toggle_repeat_hint": "Percorre o modo de repetição: desativado, tudo, uma.",
+			"action_show_app": "Mostrar aplicativo",
+			"action_show_app_hint": "Traz a janela do Limusic para o primeiro plano."
 		}
 	},
 	"dialogs": {
@@ -406,7 +540,8 @@
 			"zoom_in": "Ampliar",
 			"zoom_out": "Reduzir",
 			"reset_zoom": "Redefinir zoom",
-			"show_this_list": "Mostrar esta lista"
+			"show_this_list": "Mostrar esta lista",
+			"refresh_page": "Recarregar página"
 		},
 		"tempo_pitch": {
 			"title": "Controles de tempo e tom",
@@ -515,7 +650,8 @@
 		"expand_sidebar": "Expandir barra lateral",
 		"collapse_sidebar": "Recolher barra lateral",
 		"show_artwork": "Mostrar capa",
-		"show_video": "Mostrar vídeo"
+		"show_video": "Mostrar vídeo",
+		"zoom": "Escala da interface"
 	},
 	"lyrics": {
 		"title": "Letra",
@@ -585,7 +721,21 @@
 		"app_icon_set": "Ícone do aplicativo alterado",
 		"blocked_copied": "{count} artistas bloqueados copiados como JSON",
 		"blocked_artist": "{name} bloqueado",
-		"unblocked_artist": "{name} desbloqueado"
+		"unblocked_artist": "{name} desbloqueado",
+		"added_to_shortcuts": "Adicionado aos atalhos",
+		"already_in_shortcuts": "Já está nos atalhos",
+		"playing_next_one": "Tocando em seguida",
+		"playing_next": "{count} músicas tocam em seguida",
+		"added_to_queue_one": "Adicionado à fila",
+		"added_to_queue": "{count} músicas adicionadas à fila",
+		"liked": "Adicionada às músicas curtidas",
+		"disliked": "Marcada como não gostei",
+		"rating_removed": "Avaliação removida",
+		"subscribed": "Inscrito em {name}",
+		"unsubscribed": "Inscrição cancelada",
+		"signed_in_as": "Conectado como {name}",
+		"switched_to": "Você alternou para {name}",
+		"could_not_add": "Não foi possível adicionar esse item, tente abri-lo em vez disso"
 	},
 	"history": {
 		"title": "Histórico",
@@ -597,7 +747,7 @@
 		"signed_out": "Faça login para ver seu histórico de reprodução do YouTube Music."
 	},
 	"selection": {
-		"actions": "Ações da faixa selecionada",
+		"actions": "Ações da faixa selecionadas",
 		"count": "{count} selecionado(s)",
 		"selected": "Selecionado",
 		"not_selected": "Não selecionado",
@@ -614,6 +764,14 @@
 		"pending": "Localizando {count} faixas selecionadas nas páginas ainda carregando.",
 		"local_playlist": "Arquivos locais não podem ser adicionados a uma playlist do YouTube.",
 		"account_changed": "Interrompida a adição de músicas porque a conta foi alterada.",
-		"playlist_partial": "Adicionado {added} a {playlist}; {duplicates} já estava(m) lá; {remaining} não confirmado(s). {error}"
+		"playlist_partial": "Total adicionado à {playlist}: {added}; Total de duplicatas: {duplicates}; Total não confirmado: {remaining}. {error}",
+		"remove": "Remover desta playlist",
+		"remove_confirm": "Remover {count}?"
+	},
+	"errors": {
+		"unreachable": "Não foi possível acessar o YouTube Music. Verifique sua conexão.",
+		"offline_title": "Sem conexão",
+		"offline_body": "O Limusic não consegue acessar o YouTube Music. Verifique sua conexão com a internet e tente novamente.",
+		"generic_title": "Algo deu errado"
 	}
 }

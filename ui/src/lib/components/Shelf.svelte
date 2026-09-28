@@ -33,6 +33,7 @@
 	import TrackRow from './TrackRow.svelte';
 	import * as api from '$lib/api';
 	import type { BrowseItem } from '$lib/api';
+	import type { CardSize } from '$lib/personal';
 	import { asSong } from '$lib/browse';
 	import { openAddToPlaylist, openPlayer, playSong, playback } from '$lib/player.svelte';
 	import { t } from '$lib/i18n.svelte';
@@ -43,8 +44,8 @@
 		onMore,
 		community = false,
 		rich = true,
-		headingClass = 'font-heading text-lg font-semibold',
-		queueAll = true
+		queueAll = true,
+		size = 'medium'
 	}: {
 		title?: string;
 		items: BrowseItem[];
@@ -57,14 +58,14 @@
 		community?: boolean;
 		/** Opt out of the per-kind forms and render plain cards. */
 		rich?: boolean;
-		/** Artist and album pages use text-xl font-bold; home uses the default. */
-		headingClass?: string;
 		/**
 		 * Whether clicking a song row queues the rest of the shelf behind it. True for a shelf that
 		 * is a set (an album's songs, an artist's top tracks). False on home, where a shelf is a pile
 		 * of unrelated suggestions: clicking one there plays that one and lets autoplay take over.
 		 */
 		queueAll?: boolean;
+		/** Card width, set in Edit home. Rows of songs and community cards keep their own. */
+		size?: CardSize;
 	} = $props();
 
 	// A shelf is only worth a form of its own when it's overwhelmingly one kind of thing. Below the
@@ -114,21 +115,15 @@
 		return api.playPlaylist(songs, 0, undefined, title);
 	};
 
-	// Slot width per form, and the height the rail reserves before it has been laid out.
-	const SLOT: Record<Mode, string> = {
-		song: 'basis-full sm:basis-1/2 xl:basis-1/3',
-		album: 'w-40',
-		artist: 'w-40',
-		playlist: 'w-44',
-		card: 'w-40'
-	};
-	const HEIGHT: Record<Mode, string> = {
-		song: '17rem',
-		album: '17.5rem',
-		artist: '17.5rem',
-		playlist: '17.5rem',
-		card: '17.5rem'
-	};
+	// Slot width per form, and the height the rail reserves before it has been laid out. Songs are
+	// columns of rows, so they take a share of the rail; everything else is a card of `size` width,
+	// a playlist's a rem wider for the stack showing behind it. Inline widths, not w-* classes: a
+	// stale dev stylesheet that hasn't generated one collapses the card to its artwork's size.
+	const SONG_SLOT = 'basis-full sm:basis-1/2 xl:basis-1/3';
+	const WIDTH: Record<CardSize, number> = { small: 8, medium: 10, large: 13 };
+	const cardWidth = (playlist = false) => `width:${WIDTH[size] + (playlist ? 1 : 0)}rem`;
+	// A card is about its width plus 7.5rem of heading, caption and padding.
+	const height = $derived(mode === 'song' ? '17rem' : `${WIDTH[size] + 7.5}rem`);
 
 	let row = $state<HTMLDivElement | null>(null);
 	let canLeft = $state(false);
@@ -140,18 +135,32 @@
 		canRight = row.scrollLeft + row.clientWidth < row.scrollWidth - 4;
 	}
 
+	let hovered = false;
 	const measureOnEnter = (el: HTMLElement) => {
-		el.addEventListener('pointerenter', update);
-		return () => el.removeEventListener('pointerenter', update);
+		const enter = () => {
+			hovered = true;
+			update();
+		};
+		const leave = () => (hovered = false);
+		el.addEventListener('pointerenter', enter);
+		el.addEventListener('pointerleave', leave);
+		return () => {
+			el.removeEventListener('pointerenter', enter);
+			el.removeEventListener('pointerleave', leave);
+		};
 	};
 
 	function page(dir: 1 | -1) {
 		row?.scrollBy({ left: dir * Math.round(row.clientWidth * 0.9), behavior: 'smooth' });
 	}
 
+	// Re-measure when the content changes under the pointer, and only then. Measuring at mount reads
+	// scrollWidth before content-visibility has skipped anything, which makes WebKitGTK lay out every
+	// shelf on the page synchronously: going back to Home spent ~640 of its ~870 ms there with 8
+	// shelves (perf/navprobe.py). The arrows only show on hover, and pointerenter measures then.
 	$effect(() => {
-		items; // re-measure when content changes
-		update();
+		items;
+		if (hovered) update();
 	});
 </script>
 
@@ -164,10 +173,10 @@
      the `auto` keyword swaps in the real size once measured, so the scrollbar stays put. -->
 <section
 	class="[content-visibility:auto]"
-	style="contain-intrinsic-size: auto {HEIGHT[mode]};"
+	style="contain-intrinsic-size: auto {height};"
 >
 	{#if title || onMore}
-		<SectionHeading title={title ?? ''} icon={ICONS[mode]} {onMore} {headingClass}>
+		<SectionHeading title={title ?? ''} icon={ICONS[mode]} {onMore}>
 			{#if songs.length}
 				<button
 					onclick={playAll}
@@ -185,7 +194,7 @@
 	     An attachment rather than onpointerenter: the handler doesn't make this div interactive. -->
 	<div class="group/shelf relative" {@attach measureOnEnter}>
 		<div
-			class="flex snap-x overflow-x-auto pb-2 {mode === 'song'
+			class="rail flex snap-x overflow-x-auto pb-2 {mode === 'song'
 				? 'gap-0'
 				: community
 					? 'gap-3'
@@ -195,16 +204,12 @@
 		>
 			{#if mode === 'song'}
 				{#each others as item (item.id)}
-					<div class="min-w-0 w-40 shrink-0 snap-start pr-4"><MediaCard {item} /></div>
+					<div class="min-w-0 shrink-0 snap-start pr-4" style={cardWidth()}><MediaCard {item} /></div>
 				{/each}
-				<!-- A rule down each column but the first: the same editorial device as the heading, and
-				     what makes a paged block of rows read as columns rather than one long list. -->
+				<!-- A gutter between columns, not a rule down each one: the rows' own hover fill already
+				     shows where a column ends, and the rules were four more lines per shelf (#319). -->
 				{#each columns as col, c (c)}
-					<div
-						class="min-w-0 shrink-0 snap-start {SLOT.song} {c || others.length
-							? 'border-l pl-4'
-							: ''} pr-4"
-					>
+					<div class="min-w-0 shrink-0 snap-start {SONG_SLOT} pr-6">
 						{#each col as song, r (song.video_id + ':' + r)}
 							<TrackRow
 								{song}
@@ -225,11 +230,10 @@
 					<!-- min-w-0: a flex item's automatic minimum size is its min-content, which overrides
 					     the basis, so without this a card with a long title grows past its slot. -->
 					<div
-						class="min-w-0 shrink-0 snap-start {own
-							? community
-								? 'basis-full sm:basis-[calc((100%-0.75rem)/2)] lg:basis-[calc((100%-2.25rem)/4)]'
-								: SLOT[mode]
-							: 'w-40'}"
+						class="min-w-0 shrink-0 snap-start {own && community
+							? 'basis-full sm:basis-[calc((100%-0.75rem)/2)] lg:basis-[calc((100%-2.25rem)/4)]'
+							: ''}"
+						style={own && community ? undefined : cardWidth(own && mode === 'playlist')}
 					>
 						{#if !own}
 							<MediaCard {item} />

@@ -11,6 +11,9 @@
 	// with the shelves below. Hence wide tiles with the art flush to the leading edge — four to a row
 	// instead of seven, and the title gets four times the width.
 	//
+	// A tinted surface, no outline: the tiles often sit on the header's artwork, and a grid of
+	// outlined boxes was most of what made the top of home feel boxed in (#319).
+	//
 	// ponytail: drag is the only way to reorder (no keyboard equivalent). Add/remove/open all work
 	// from the keyboard; wire arrow-key moves onto the tiles if anyone actually needs it.
 	import { flip } from 'svelte/animate';
@@ -19,7 +22,6 @@
 		Cancel01Icon,
 		Add01Icon,
 		DashboardSquare02Icon,
-		Edit01Icon,
 		PlayIcon,
 		MusicNote01Icon,
 		UserIcon,
@@ -36,11 +38,6 @@
 	import { getDragItem, isDragItem, setDragItem } from '$lib/dnd';
 	import { t } from '$lib/i18n.svelte';
 	import ItemMenu from './ItemMenu.svelte';
-
-	// The page owns the Edit-home modal; this section only lends it a place to be opened from. Its
-	// header is the first thing on home and the one row that's always there, so the button that
-	// rearranges the rest of the page lives here rather than following a section that can be hidden.
-	let { onEdit }: { onEdit?: () => void } = $props();
 
 	// Tiles are stored as a snapshot of the card, so a playlist that has gained tracks since it was
 	// pinned would keep showing the old count; `freshen` overlays the live library row (#67).
@@ -102,21 +99,6 @@
 
 <section>
 	<SectionHeading title={t('home.shortcuts')} icon={DashboardSquare02Icon}>
-		{#snippet lead()}
-			{#if onEdit}
-				<!-- Labelled and outlined, not a bare glyph: this is the only entry point to rearranging
-				     home, and as an icon on its own nobody found it. The tooltip carries the scope the
-				     one-word label can't, sitting as it does under the Shortcuts heading. -->
-				<button
-					onclick={onEdit}
-					title={t('home.edit_home')}
-					class="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1 text-sm font-medium text-muted-foreground transition-colors hover:border-foreground/20 hover:bg-muted hover:text-foreground"
-				>
-					<HugeiconsIcon icon={Edit01Icon} class="h-4 w-4" />
-					{t('home.edit_home')}
-				</button>
-			{/if}
-		{/snippet}
 		{#if picks.length && picks.length < MAX_PICKS}
 			<!-- Adding is an action, not a tile: as a trailing "+" square it left a dashed hole at the
 			     end of the grid forever, and a ragged one whenever the last row was short. -->
@@ -180,7 +162,7 @@
 							<div class="absolute -left-1 bottom-0 top-0 z-20 w-0.5 rounded-full bg-primary"></div>
 						{/if}
 						<div
-							class="flex h-16 cursor-pointer items-center gap-3 overflow-hidden rounded-xl border bg-card/40 text-left transition-colors hover:border-foreground/20 hover:bg-card"
+							class="flex h-16 cursor-pointer items-center gap-3 overflow-hidden rounded-xl bg-foreground/5 text-left transition-colors hover:bg-foreground/10"
 							role="button"
 							tabindex="0"
 							draggable="true"

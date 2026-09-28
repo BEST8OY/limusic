@@ -172,3 +172,24 @@ function headingFor(block: QueueBlock, sourceName?: string | null): string {
 	if (name) return `Next from: ${name}`;
 	return block.rows.every((r) => r.item.queued || r.item.queued_end) ? 'Next in queue' : 'Next up';
 }
+
+/**
+ * Can this row be removed from the playlist it is playing out of (issue #270)? Three things have
+ * to hold, and each one is load-bearing:
+ *
+ * - a playlist is what's playing (`sourceId`); a radio or a single song has nothing to edit;
+ * - the row carries the `setVideoId` that identifies it *inside* that playlist. Only rows that
+ *   came off a playlist page do, so a row added to the queue by hand, or one YouTube generated,
+ *   is correctly left alone: YouTube needs that id to know which copy to drop;
+ * - the saved-in index (`player.svelte.ts`, `savedIn.map`) lists the playlist for this song. It
+ *   only ever indexes playlists the user owns, so this is the ownership check as well as the
+ *   membership one, and it costs no round trip.
+ */
+export function removableFromPlaylist(
+	song: SongItem,
+	playlistId: string | null | undefined,
+	savedIn: Record<string, string[]>
+): boolean {
+	if (!playlistId || !song.set_video_id) return false;
+	return savedIn[song.video_id]?.includes(playlistId) ?? false;
+}

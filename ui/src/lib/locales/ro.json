@@ -271,15 +271,12 @@
 			"system_titlebar_hint": "Lăsă desktopul să păstreze cadrul ferestrei și butoanele acesteia. Limusic își păstrează propria bară de instrumente dedesubt."
 		},
 		"themes": {
-			"accent_themes": "Teme cu accent",
 			"interface_font": "Font de interfață",
 			"load_font_file": "Încarcă un font din fișier",
 			"custom_colors": "Culori personalizate",
 			"primary_color": "Culoare de accent primar",
 			"background_color": "Fundal",
 			"reset_theme": "Resetează la tema standard",
-			"accent_colors": "Culori de accent",
-			"palettes": "Palete",
 			"your_fonts": "Fonturile tale",
 			"custom_font": "Personalizate…",
 			"font_placeholder": "Font instalat pe acest computer, ex. Inter",

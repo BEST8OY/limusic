@@ -4,13 +4,16 @@
 use std::sync::Arc;
 
 use innertubex::{
-    AlbumPage, ArtistPage, BrowseItem, HistoryGroup, HomePage, PlaylistContinuation, PlaylistPage,
-    PlaylistSort, Rating, SearchResults, SongItem,
+    AlbumPage, ArtistPage, BrowseItem, HistoryGroup, HomePage, MoodSection, PlaylistContinuation,
+    PlaylistPage, PlaylistSort, Rating, SearchResults, SongItem,
 };
 use tauri::{Emitter, State};
 
 use crate::blocked::BlockedArtist;
-use crate::state::{AppState, ON_REPEAT_ID, ON_REPEAT_LIMIT, ON_REPEAT_WINDOW_SECS};
+use crate::state::{
+    is_local_playlist, AppState, LOCAL_PLAYLIST_PREFIX, ON_REPEAT_ID, ON_REPEAT_LIMIT,
+    ON_REPEAT_WINDOW_SECS,
+};
 
 type St<'a> = State<'a, Arc<AppState>>;
 
@@ -25,6 +28,15 @@ pub async fn search(
     let client = state.clients.get(innertubex::METADATA_CLIENT).ok_or("metadata client missing")?;
     let result =
         state.it.search_songs(client, &query, record_history).await.map_err(|e| e.to_string())?;
+    Ok(result.items)
+}
+
+/// Search video uploads only: the Videos shelf and its "Show more" page (#209, #266). Never
+/// records history, the page's other searches already did.
+#[tauri::command]
+pub async fn search_videos(state: St<'_>, query: String) -> Result<Vec<SongItem>, String> {
+    let client = metadata_client(&state)?;
+    let result = state.it.search_videos(client, &query).await.map_err(|e| e.to_string())?;
     Ok(result.items)
 }
 
@@ -129,6 +141,15 @@ pub async fn prev_track(state: St<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// The queue panel's "Back to …": put back the queue a click replaced, at the track and position
+/// it was left at. Previous does this too, but only from the top of a track; this one is the whole
+/// point of the line, so it doesn't rewind first.
+#[tauri::command]
+pub async fn back_to_previous(state: St<'_>) -> Result<(), String> {
+    state.inner().clone().restore_prev_context().await;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn toggle_shuffle(state: St<'_>) -> Result<(), String> {
     state.inner().clone().toggle_shuffle().await;
@@ -164,6 +185,9 @@ pub async fn seek(state: St<'_>, position: f64) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_volume(state: St<'_>, volume: i64) -> Result<(), String> {
     state.player.set_volume(volume).map_err(|e| e.to_string())?;
+    if volume > 0 {
+        crate::hotkeys::LAST_NONZERO_VOLUME.store(volume, std::sync::atomic::Ordering::Relaxed);
+    }
     // There is one volume and there can be two windows (the mini player). Without this the one
     // that didn't move the slider keeps showing the old level and lies about what you're hearing.
     let _ = state.app.emit("volume", volume);
@@ -191,10 +215,11 @@ pub async fn get_queue(state: St<'_>) -> Result<serde_json::Value, String> {
 /// `visitor_data`) and internal blobs (`queue_json`, `queue_index`, `queue_position`) never cross
 /// into the webview: they'd otherwise ship the login credential to the renderer on every open, and
 /// the webview can't overwrite them either.
-const UI_SETTINGS: [&str; 19] = [
+const UI_SETTINGS: [&str; 24] = [
     "volume",
     "proxy",
     "quality",
+    "normalize_volume",
     "enable_history",
     "disabled_stream_clients",
     "discord_rpc",
@@ -205,12 +230,16 @@ const UI_SETTINGS: [&str; 19] = [
     "hide_videos",
     "prevent_duplicates",
     "update_banner",
-    "lyrics_boidu",
+    "update_channel",
+    "lyrics_providers",
     "music_videos",
     "sticky_shuffle",
     "system_titlebar",
     "lastfm_primary_artist",
     "lastfm_primary_strict",
+    "crossfade",
+    "crossfade_secs",
+    "locale",
 ];
 
 /// Resolve the music video for `video_id` and hand back a `limusicvideo://` URL the player view
@@ -234,7 +263,7 @@ pub async fn video_stream(
     }
     // The webview picks the height from its own box, so clamp it here rather than trusting it.
     let max_height = max_height.clamp(144, 1080);
-    match state.orchestrator.resolve_video(&video_id, max_height).await {
+    match state.orchestrator.resolve_video(&video_id, max_height, &state.disabled_clients()).await {
         Some(url) => {
             state.put_video_url(&video_id, url);
             Ok(crate::videoproxy::url_for(&video_id))
@@ -301,13 +330,29 @@ pub async fn set_setting(
     if key == "discord_rpc_config" {
         state.set_discord_config(&value);
     }
+    // Retune the track that's playing. Unlike crossfade below, this one has to apply to what the
+    // user is hearing right now: the switch exists so they can A/B the same loud section (#298).
+    if key == "normalize_volume" {
+        state.reapply_gain().await;
+    }
+    // Both halves are one player setting. Applies from the next track change: the transition the
+    // user is already hearing keeps the length it started with.
+    if key == "crossfade" || key == "crossfade_secs" {
+        state.apply_crossfade().await;
+    }
+    // The language YouTube answers in (#274). The SPA writes it whenever the two disagree, which is
+    // also how a fresh install's language gets here at all. It drops its own browse cache and
+    // remounts the route afterwards, so what is already on screen follows without a restart.
+    if key == "locale" {
+        state.it.set_locale(&value);
+    }
     // Applies to what's fetched from here on: the live queue keeps whatever is already in it.
     if key == "hide_videos" {
         state.it.set_hide_videos(value == "true");
     }
-    // Cached lyrics outlive the setting that produced them, so a track fetched while Boidu was on
-    // would keep its word timings (and one fetched while off would never gain them) forever.
-    if key == "lyrics_boidu" {
+    // Cached lyrics outlive the order that produced them, so a reorder would otherwise reach only
+    // songs never played. Songs whose source was picked by hand keep it.
+    if key == "lyrics_providers" {
         state.db.clear_lyrics_cache();
     }
     // Hand the frame back to the compositor (or take it again). macOS is not on this path: its
@@ -335,6 +380,50 @@ pub async fn set_setting(
         res.map_err(|e| format!("autostart: {e}"))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_global_hotkeys(
+    hotkeys: State<'_, Arc<crate::hotkeys::HotkeysManager>>,
+) -> Result<crate::hotkeys::HotkeysConfig, String> {
+    Ok(hotkeys.get_config())
+}
+
+/// A Wayland session, where the X11 grab the hotkeys use only fires if the compositor passes keys
+/// on to XWayland (KDE Plasma does, GNOME does not). The GDK backend doesn't matter, the session does.
+#[tauri::command]
+pub fn global_hotkeys_on_wayland() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+#[tauri::command]
+pub async fn set_global_hotkeys(
+    app: tauri::AppHandle,
+    state: St<'_>,
+    hotkeys: State<'_, Arc<crate::hotkeys::HotkeysManager>>,
+    config: crate::hotkeys::HotkeysConfig,
+) -> Result<crate::hotkeys::HotkeyRegisterResult, String> {
+    let result = hotkeys.apply_config(&app, config);
+    // Saved even on partial failure: apply_config already made this the live config, and a
+    // combo another app holds shouldn't cost the user every other binding on the next launch.
+    crate::hotkeys::save_config(&state.db, &result.config);
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn reset_global_hotkeys(
+    app: tauri::AppHandle,
+    state: St<'_>,
+    hotkeys: State<'_, Arc<crate::hotkeys::HotkeysManager>>,
+) -> Result<crate::hotkeys::HotkeyRegisterResult, String> {
+    // Resets the bindings only: the default has hotkeys off, and the button is on the enabled page.
+    let default_config = crate::hotkeys::HotkeysConfig {
+        enabled: hotkeys.get_config().enabled,
+        ..Default::default()
+    };
+    let result = hotkeys.apply_config(&app, default_config);
+    crate::hotkeys::save_config(&state.db, &result.config);
+    Ok(result)
 }
 
 /// The streamable client keys the orchestrator tries, for the "disabled clients" setting. Names
@@ -599,6 +688,7 @@ pub async fn get_library(state: St<'_>) -> Result<Vec<BrowseItem>, String> {
                 subtitle: Some(format!("{} songs", songs.len())),
                 thumbnail: None, // the UI draws an icon cover for this one
                 duration: None,
+                album_id: None,
                 artist_runs: Vec::new(),
                 play_count: None,
                 is_video: false,
@@ -607,6 +697,11 @@ pub async fn get_library(state: St<'_>) -> Result<Vec<BrowseItem>, String> {
             },
         );
     }
+    // The playlists on this machine next, signed in or not: they belong to no account.
+    let at = usize::from(items.first().is_some_and(|i| i.id == ON_REPEAT_ID));
+    let local: Vec<BrowseItem> =
+        state.db.local_playlists().iter().map(|p| local_playlist_card(&state, p)).collect();
+    items.splice(at..at, local);
     // A card has nowhere to put two images, so a custom cover simply is the artwork here.
     for item in &mut items {
         if let Some(cover) = custom_cover(&state, &item.id) {
@@ -684,6 +779,9 @@ pub async fn get_playlist(
             collaborative: false,
             sort_menu: None, // built from local history, so YouTube has no order to give
         });
+    }
+    if is_local_playlist(&id) {
+        return local_playlist_page(&state, &id);
     }
     let client = metadata_client(&state)?;
     let sort = sort.map(|s| (s, desc.unwrap_or(false)));
@@ -786,6 +884,39 @@ pub async fn get_artist(state: St<'_>, id: String) -> Result<ArtistPage, String>
     let client = metadata_client(&state)?;
     state.it.artist(client, &id).await.map_err(|e| e.to_string())
 }
+
+/// Moods & Genres, the tiles the search page opens on.
+#[tauri::command]
+pub async fn get_moods(state: St<'_>) -> Result<Vec<MoodSection>, String> {
+    let client = metadata_client(&state)?;
+    state.it.moods(client).await.map_err(|e| e.to_string())
+}
+
+/// A cover for each Moods & Genres tile, which YouTube draws as a coloured button with no art: the
+/// first playlist in that tile's category. Six categories at a time. A tile whose category fails
+/// or comes back empty is left out, and the page draws it without art. The page keeps what comes
+/// back, so this runs once per tile, not once per visit.
+#[tauri::command]
+pub async fn get_mood_art(
+    state: St<'_>,
+    params: Vec<String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    use futures_util::StreamExt;
+    let client = metadata_client(&state)?;
+    let it = &state.it;
+    Ok(futures_util::stream::iter(params)
+        .map(|p| async move {
+            let items = it.browse_grid(client, MOODS_CATEGORY_ID, Some(&p)).await.ok()?;
+            Some((p, items.into_iter().find_map(|i| i.thumbnail)?))
+        })
+        .buffer_unordered(6)
+        .filter_map(|art| async move { art })
+        .collect()
+        .await)
+}
+
+/// The browseId every Moods & Genres tile opens with its own `params`.
+const MOODS_CATEGORY_ID: &str = "FEmusic_moods_and_genres_category";
 
 /// A card grid reached from a carousel's "More" button (e.g. an artist's full albums list).
 #[tauri::command]
@@ -894,6 +1025,11 @@ fn editable_playlist<'a>(
     if playlist_id == LIKED_MUSIC_ID {
         return Err("Liked Music follows your likes; like the song instead.".into());
     }
+    // The commands that edit one dispatch before they get here. This is the net for any that
+    // doesn't, so a playlist on this machine can never reach YouTube as an id it has never seen.
+    if is_local_playlist(playlist_id) {
+        return Err("This playlist is on this device, so that isn't available for it.".into());
+    }
     require_login(state)
 }
 
@@ -929,8 +1065,9 @@ pub async fn sync_playlist_index(
     state: St<'_>,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
     if !state.it.is_logged_in() {
+        // What is left is the playlists on this machine, which no account owns.
         state.db.clear_playlist_index();
-        return Ok(std::collections::HashMap::new());
+        return Ok(state.db.playlist_memberships());
     }
     let fresh_until = state
         .db
@@ -1009,6 +1146,10 @@ pub async fn remove_from_playlist(
     video_id: String,
     set_video_id: String,
 ) -> Result<(), String> {
+    if is_local_playlist(&playlist_id) {
+        let row = set_video_id.parse().map_err(|_| GONE.to_string())?;
+        return remove_local_rows(&state, &playlist_id, &[row]);
+    }
     let client = editable_playlist(&state, &playlist_id)?;
     state
         .it
@@ -1019,8 +1160,51 @@ pub async fn remove_from_playlist(
     Ok(())
 }
 
+/// Remove several tracks from one playlist in a single request (the bulk bar's Remove).
+///
+/// All or nothing: YouTube applies the whole action list or rejects it, so the UI can revert its
+/// optimistic removal on an error without working out which rows made it.
 #[tauri::command]
-pub async fn create_playlist(state: St<'_>, title: String) -> Result<String, String> {
+pub async fn remove_many_from_playlist(
+    state: St<'_>,
+    playlist_id: String,
+    tracks: Vec<(String, String)>,
+) -> Result<(), String> {
+    if is_local_playlist(&playlist_id) {
+        let rows = tracks
+            .iter()
+            .map(|(_, row)| row.parse().map_err(|_| GONE.to_string()))
+            .collect::<Result<Vec<i64>, _>>()?;
+        return remove_local_rows(&state, &playlist_id, &rows);
+    }
+    let client = editable_playlist(&state, &playlist_id)?;
+    state
+        .it
+        .playlist_remove_many(client, &playlist_id, &tracks)
+        .await
+        .map_err(|e| e.to_string())?;
+    for (video_id, _) in &tracks {
+        state.db.remove_playlist_track(&playlist_id, video_id);
+    }
+    Ok(())
+}
+
+/// `local`: keep it on this machine instead of the account (issue #251), which is the only kind
+/// there is while signed out. Answers the new playlist's id, a `LOCALPLAYLIST:` browseId for that.
+#[tauri::command]
+pub async fn create_playlist(
+    state: St<'_>,
+    title: String,
+    local: Option<bool>,
+) -> Result<String, String> {
+    if local.unwrap_or(false) {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("Give the playlist a name.".into());
+        }
+        let id = state.db.create_local_playlist(title, crate::db::now_secs()).map_err(db_err)?;
+        return Ok(format!("{LOCAL_PLAYLIST_PREFIX}{id}"));
+    }
     let client = require_login(&state)?;
     state.it.create_playlist(client, &title).await.map_err(|e| e.to_string())
 }
@@ -1037,6 +1221,18 @@ pub async fn edit_playlist_details(
     description: Option<String>,
     public: Option<bool>,
 ) -> Result<(), String> {
+    // Nobody else can see a playlist on this machine, so there is no visibility to set.
+    if is_local_playlist(&playlist_id) {
+        let name = name.as_deref().map(str::trim);
+        if name == Some("") {
+            return Err("Give the playlist a name.".into());
+        }
+        let key = local_key(&playlist_id)?;
+        return state
+            .db
+            .edit_local_playlist(key, name, description.as_deref(), crate::db::now_secs())
+            .map_err(db_err);
+    }
     let client = editable_playlist(&state, &playlist_id)?;
     // The switch is two-state; YouTube's third value (UNLISTED) is only ever left as it was.
     let privacy = public.map(|p| if p { "PUBLIC" } else { "PRIVATE" });
@@ -1162,7 +1358,7 @@ pub struct CoverResult {
 /// playlist's cover on this machine. Signed out (or On Repeat, which YouTube has never heard of),
 /// there is nothing to sync and local is all there ever was.
 fn sync_cover(state: &Arc<AppState>, playlist_id: &str, path: String) {
-    if playlist_id == ON_REPEAT_ID || !state.it.is_logged_in() {
+    if playlist_id == ON_REPEAT_ID || is_local_playlist(playlist_id) || !state.it.is_logged_in() {
         return;
     }
     let state = Arc::clone(state);
@@ -1200,7 +1396,7 @@ async fn clear_cover_on_youtube(
     state: &Arc<AppState>,
     playlist_id: &str,
 ) -> Result<Option<String>, String> {
-    if playlist_id == ON_REPEAT_ID || !state.it.is_logged_in() {
+    if playlist_id == ON_REPEAT_ID || is_local_playlist(playlist_id) || !state.it.is_logged_in() {
         return Ok(None);
     }
     let client = metadata_client(state)?;
@@ -1227,10 +1423,137 @@ fn custom_cover(state: &Arc<AppState>, playlist_id: &str) -> Option<String> {
 
 #[tauri::command]
 pub async fn delete_playlist(state: St<'_>, playlist_id: String) -> Result<(), String> {
+    if is_local_playlist(&playlist_id) {
+        state.db.delete_local_playlist(local_key(&playlist_id)?).map_err(db_err)?;
+        // Its artwork was a copy made for it, so it goes too.
+        if let Some(cover) = state.db.get_setting(&cover_key(&playlist_id)) {
+            let _ = std::fs::remove_file(cover);
+            state.db.delete_setting(&cover_key(&playlist_id));
+        }
+        return Ok(());
+    }
     let client = editable_playlist(&state, &playlist_id)?;
     state.it.delete_playlist(client, &playlist_id).await.map_err(|e| e.to_string())?;
     state.db.forget_playlist(&playlist_id);
     Ok(())
+}
+
+// --- playlists on this machine (issue #251) --------------------------------------------------
+// A `LOCALPLAYLIST:<n>` id reaches the same commands a YouTube playlist does (get, add, remove,
+// edit, cover, delete), and each one answers it from SQLite before any of the YouTube path runs.
+// That is what lets every playlist surface in the UI take both kinds without branching.
+
+const GONE: &str = "This playlist is no longer on this device.";
+
+/// `LOCALPLAYLIST:<n>` → n. An id with the prefix and no number is still not YouTube's, so it is
+/// an error rather than a fall-through to a browse YouTube would 400.
+fn local_key(id: &str) -> Result<i64, String> {
+    id.strip_prefix(LOCAL_PLAYLIST_PREFIX).and_then(|n| n.parse().ok()).ok_or_else(|| GONE.into())
+}
+
+fn db_err(e: rusqlite::Error) -> String {
+    match e {
+        rusqlite::Error::QueryReturnedNoRows => GONE.into(),
+        e => e.to_string(),
+    }
+}
+
+/// The library card. The subtitle is English on purpose: Rust never learns the UI language, so
+/// `api.ts` rewords it on the way in, the same as On Repeat's.
+fn local_playlist_card(state: &Arc<AppState>, p: &crate::db::LocalPlaylist) -> BrowseItem {
+    let id = format!("{LOCAL_PLAYLIST_PREFIX}{}", p.id);
+    // A cover the user picked, else the first track's art, which is what YouTube shows for a
+    // playlist too short for its four-track collage.
+    let thumbnail = custom_cover(state, &id).or_else(|| {
+        let first = p.first_song.as_deref()?;
+        serde_json::from_str::<SongItem>(first).ok()?.thumbnail
+    });
+    BrowseItem {
+        kind: "playlist",
+        id,
+        title: p.title.clone(),
+        subtitle: Some(format!("{} songs", p.count)),
+        thumbnail,
+        duration: None,
+        album_id: None,
+        artist_runs: Vec::new(),
+        play_count: None,
+        is_video: false,
+        is_upload: false,
+        explicit: false,
+    }
+}
+
+fn local_playlist_page(state: &Arc<AppState>, id: &str) -> Result<PlaylistPage, String> {
+    let key = local_key(id)?;
+    let p = state.db.local_playlist(key).ok_or(GONE)?;
+    // The row id rides as the `set_video_id`, the handle every removal path already sends back.
+    // A row whose JSON no longer parses (a `SongItem` shape change) is skipped, not fatal.
+    let items: Vec<SongItem> = state
+        .db
+        .local_playlist_tracks(key)
+        .into_iter()
+        .filter_map(|(row, json)| {
+            let song: SongItem = serde_json::from_str(&json).ok()?;
+            Some(SongItem { set_video_id: Some(row.to_string()), ..song })
+        })
+        .collect();
+    Ok(PlaylistPage {
+        title: Some(p.title),
+        subtitle: Some(format!("{} songs", items.len())), // the page words its own count
+        thumbnail: items.first().and_then(|s| s.thumbnail.clone()),
+        description: (!p.description.is_empty()).then_some(p.description),
+        privacy: None,
+        cover: custom_cover(state, id),
+        items,
+        continuation: None, // it is all here: nothing to page through
+        owned: true,
+        collaborative: false,
+        sort_menu: None, // no server to keep an order, so every sort is done on the page
+    })
+}
+
+/// What a track keeps once it is in a playlist: the song, none of the context it was added from
+/// (`shed_queue_context`), and no snapshot of account state that would go stale behind it. The
+/// rating is read live (the override map, the saved-in index), and Library ▸ Songs tokens are
+/// minted per row for one account while these playlists belong to none.
+fn playlist_row(s: SongItem) -> SongItem {
+    SongItem { rating: None, library: None, ..shed_queue_context(s) }
+}
+
+fn remove_local_rows(state: &Arc<AppState>, playlist_id: &str, rows: &[i64]) -> Result<(), String> {
+    let key = local_key(playlist_id)?;
+    state.db.remove_local_playlist_tracks(key, rows, crate::db::now_secs()).map_err(db_err)
+}
+
+/// Just the playlists on this machine, as library cards. The UI re-reads these after every edit
+/// (the count and the artwork follow the tracks), and falls back on them when the account's
+/// library can't be fetched, since these need no network.
+#[tauri::command]
+pub async fn local_playlists(state: St<'_>) -> Result<Vec<BrowseItem>, String> {
+    Ok(state.db.local_playlists().iter().map(|p| local_playlist_card(&state, p)).collect())
+}
+
+/// Add tracks to a playlist on this machine, answering per track whether it went in (`false`: it
+/// was there already, refused the way YouTube refuses one). Whole `SongItem`s rather than the
+/// videoIds `add_to_playlist` takes, because nothing will ever fill in a title or artwork later:
+/// there is no YouTube playlist to re-read. Files on disk are welcome, unlike in a YouTube one.
+#[tauri::command]
+pub async fn add_to_local_playlist(
+    state: St<'_>,
+    playlist_id: String,
+    items: Vec<SongItem>,
+) -> Result<Vec<bool>, String> {
+    let key = local_key(&playlist_id)?;
+    let rows = items
+        .into_iter()
+        .map(|song| {
+            let song = playlist_row(song);
+            let json = serde_json::to_string(&song).map_err(|e| e.to_string())?;
+            Ok((song.video_id, json))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    state.db.add_local_playlist_tracks(key, &rows, crate::db::now_secs()).map_err(db_err)
 }
 
 #[tauri::command]
@@ -1413,7 +1736,8 @@ pub async fn lt_request_sync(state: St<'_>) -> Result<(), String> {
 // --- lyrics ---------------------------------------------------------------------------------
 
 /// Lyrics for a track (cached). The UI passes the metadata it already has from `now-playing`;
-/// `duration` is mpv's length in seconds. `None` = no lyrics found anywhere.
+/// `duration` is mpv's length in seconds. `None` = no lyrics found anywhere. `source` asks one
+/// provider alone, uncached: the source picker's preview.
 #[tauri::command]
 pub async fn get_lyrics(
     state: St<'_>,
@@ -1422,12 +1746,37 @@ pub async fn get_lyrics(
     artists: String,
     album: Option<String>,
     duration: Option<f64>,
+    source: Option<String>,
 ) -> Result<Option<crate::lyrics::Lyrics>, String> {
-    Ok(crate::lyrics::get_lyrics(
-        state.inner(),
-        crate::lyrics::LyricsRequest { video_id, title, artists, album, duration },
-    )
-    .await)
+    let req = crate::lyrics::LyricsRequest { video_id, title, artists, album, duration };
+    crate::lyrics::get_lyrics(state.inner(), req, source).await
+}
+
+/// Keep one provider's lyrics for this song (`source`), or hand it back to the provider order
+/// (`None`). Returns what the song shows now.
+#[tauri::command]
+pub async fn choose_lyrics_source(
+    state: St<'_>,
+    video_id: String,
+    title: String,
+    artists: String,
+    album: Option<String>,
+    duration: Option<f64>,
+    source: Option<String>,
+) -> Result<Option<crate::lyrics::Lyrics>, String> {
+    let req = crate::lyrics::LyricsRequest { video_id, title, artists, album, duration };
+    Ok(crate::lyrics::choose_source(state.inner(), req, source).await)
+}
+
+#[tauri::command]
+pub fn set_lyrics_offset(state: St<'_>, video_id: String, offset_ms: i64) {
+    crate::lyrics::set_offset(state.inner(), &video_id, offset_ms);
+}
+
+/// Every lyrics provider in the user's order, for Settings and the source picker.
+#[tauri::command]
+pub fn lyrics_providers(state: St<'_>) -> Vec<crate::lyrics::ProviderInfo> {
+    crate::lyrics::providers(state.inner())
 }
 
 // --- Changelog ------------------------------------------------------------------------------
@@ -1510,6 +1859,56 @@ pub fn can_self_update(app: tauri::AppHandle) -> bool {
         let _ = app;
         true
     }
+}
+
+/// The beta channel's manifest. `beta` is a permanent prerelease holding nothing but this file, and
+/// the release workflows move it to the newest release candidate, or to the newest release once that
+/// is ahead, so the URL never changes.
+const BETA_MANIFEST: &str =
+    "https://github.com/SimoHypers/limusic/releases/download/beta/latest.json";
+
+/// What the updater plugin's own `check` command returns, so the UI can wrap it in the plugin's
+/// `Update` class and install it the usual way.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BetaUpdate {
+    rid: tauri::ResourceId,
+    current_version: String,
+    version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
+    raw_json: serde_json::Value,
+}
+
+/// The updater plugin's `check()`, pointed at the beta manifest. The plugin takes its endpoint from
+/// tauri.conf.json and its JS `check` has no way to pass another, so this mirrors its `check`
+/// command (tauri-plugin-updater 2.10.1, `commands.rs`) with the endpoint swapped. The `Update` goes
+/// into the same resource table, which is what lets the plugin's `downloadAndInstall` find it.
+///
+/// Any different version counts, same as `allowDowngrades` on stable: the pointer only moves forward
+/// by itself, so a lower version there is a beta rollback somebody made on purpose.
+#[tauri::command]
+pub async fn check_beta_update(webview: tauri::Webview) -> Result<Option<BetaUpdate>, String> {
+    use tauri::Manager;
+    use tauri_plugin_updater::UpdaterExt;
+    let url = tauri::Url::parse(BETA_MANIFEST).map_err(|e| e.to_string())?;
+    let update = webview
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .version_comparator(|current, remote| remote.version != current)
+        .build()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(update.map(|u| BetaUpdate {
+        current_version: u.current_version.clone(),
+        version: u.version.clone(),
+        body: u.body.clone(),
+        raw_json: u.raw_json.clone(),
+        rid: webview.resources_table().add(u),
+    }))
 }
 
 /// Open a link from the UI in the real browser. An `<a href>` inside the webview would navigate

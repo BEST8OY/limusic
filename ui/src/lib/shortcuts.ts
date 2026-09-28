@@ -6,7 +6,7 @@ import { browser } from '$app/environment';
 import * as api from './api';
 import { cycleRepeat, np, nudgeVolume, playback, refreshView, toggleMute, ui } from './player.svelte';
 
-const IS_MAC = browser && navigator.platform.startsWith('Mac');
+export const IS_MAC = browser && navigator.platform.startsWith('Mac');
 
 /** How this machine writes the modifier these shortcuts hang off, for anything that shows a key
  *  hint. Mac takes the bare glyph; everywhere else the `+` is part of the spelling. */
@@ -58,6 +58,9 @@ export function initShortcuts(mini = false) {
 			e.preventDefault();
 			return;
 		}
+		// Ctrl+Alt belongs to the global hotkeys (Ctrl+Alt+M would otherwise mute here too and the
+		// two toggles cancel out), and on Windows it is also how AltGr arrives, typing a character.
+		if (e.altKey) return;
 		if (mini && ('kKeE'.includes(e.key) || isHelpKey(e.key))) return;
 		// Out of the switch because the key is per-platform: on macOS ⌘H has to fall through
 		// untouched, so the window still hides.

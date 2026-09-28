@@ -11,6 +11,7 @@
 <script lang="ts">
 	import { releaseNotes, openExternal } from '$lib/api';
 	import { t } from '$lib/i18n.svelte';
+	import { friendlyNetError } from '$lib/neterr';
 
 	let { current }: { current: string } = $props();
 
@@ -124,5 +125,7 @@
 		<p class="py-2 text-sm text-muted-foreground">{t('changelog.no_releases')}</p>
 	{/each}
 {:catch e}
-	<p class="py-2 text-sm text-muted-foreground">{t('changelog.load_failed', { error: e })}</p>
+	<p class="py-2 text-sm text-muted-foreground">
+		{t('changelog.load_failed', { error: friendlyNetError(String(e), t('errors.unreachable')) })}
+	</p>
 {/await}

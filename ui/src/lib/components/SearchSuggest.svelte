@@ -37,7 +37,7 @@
 	let open = $state(false);
 	let items = $state<BrowseItem[]>([]);
 	let loading = $state(false);
-	let active = $state(-1); // keyboard-highlighted row, -1 = none (Enter submits the form)
+	let active = $state(-1); // arrow-key row, -1 = none (Enter submits the form); the mouse never sets it
 	let loadedFor = ''; // query `items` belongs to, so a stale response can't land
 	// The row the right-click menu belongs to: whatever the pointer last entered. It lives outside
 	// the panel and outlives it, because taking a menu action moves focus and closes the panel, and
@@ -190,7 +190,10 @@
 							: 'hover:bg-accent/40'} {hero ? 'border-b py-2.5' : 'py-1.5'}"
 						onmousedown={(e) => e.preventDefault()}
 						onmouseenter={() => {
-							active = i;
+							// The pointer takes over from the arrow keys but never arms Enter: hovering a row
+							// on the way to the field left it highlighted, and Enter played it instead of
+							// searching (#334). Hover shows through `hover:` alone.
+							active = -1;
 							ctxItem = item;
 						}}
 						onclick={() => choose(item)}

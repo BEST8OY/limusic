@@ -87,7 +87,7 @@
 <div
 	bind:this={root}
 	data-ctx
-	class="group relative flex h-full min-w-0 flex-col gap-2 rounded-2xl border bg-card/40 p-2.5 transition-colors hover:border-foreground/20 hover:bg-card"
+	class="group relative flex h-full min-w-0 flex-col gap-2 rounded-2xl bg-foreground/5 p-2.5 transition-colors hover:bg-foreground/10"
 >
 	<ItemMenu
 		{item}
@@ -111,7 +111,7 @@
 	>
 		<!-- No shadow at rest, and none faded in on hover: transitioning shadow-sm to shadow-lg makes
 		     WebKit compute a different gaussian blur every frame, for every card in the repainted
-		     tile. The card's border and background already answer the hover. -->
+		     tile. The card's background already answers the hover. -->
 		<div
 			class="relative mx-auto aspect-square w-full max-w-44 overflow-hidden rounded-xl bg-muted"
 		>
@@ -125,7 +125,7 @@
 				<img
 					src={thumb(cover, 400)}
 					alt=""
-					class="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-105"
+					class="h-full w-full object-cover"
 					loading="lazy"
 				/>
 			{:else}

@@ -5,8 +5,8 @@ use serde::Serialize;
 use crate::blocklist;
 use crate::clients::YouTubeClient;
 use crate::models::browse::{
-    self, AlbumPage, ArtistPage, BrowseItem, HistoryGroup, HomePage, PlaylistContinuation,
-    PlaylistPage, PlaylistSort, SearchResults,
+    self, AlbumPage, ArtistPage, BrowseItem, HistoryGroup, HomePage, MoodSection,
+    PlaylistContinuation, PlaylistPage, PlaylistSort, SearchResults,
 };
 use crate::models::context::Context;
 use crate::models::lyrics::{self, PlainLyrics, TimedLyricLine};
@@ -20,6 +20,7 @@ use crate::transport::{Error, InnerTube};
 
 /// Search filter params (opaque base64). context/08.
 pub const FILTER_SONG: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
+pub const FILTER_VIDEO: &str = "EgWKAQIQAWoKEAkQChAFEAMQBA%3D%3D";
 pub const FILTER_ALBUM: &str = "EgWKAQIYAWoKEAkQChAFEAMQBA%3D%3D";
 pub const FILTER_ARTIST: &str = "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D";
 pub const FILTER_COMMUNITY_PLAYLIST: &str = "EgeKAQQoAEABagoQAxAEEAoQCRAF";
@@ -146,6 +147,24 @@ impl InnerTube {
         let mut r = metadata::parse_search(&value);
         self.drop_video_songs(&mut r.items);
         Ok(r)
+    }
+
+    /// Search video uploads only (`FILTER_VIDEO`): the covers, live sets and remixes that never
+    /// got an official release, which `FILTER_SONG` cannot return by definition (#209, #266).
+    /// context/08.
+    pub async fn search_videos(
+        &self,
+        metadata_client: &YouTubeClient,
+        query: &str,
+    ) -> Result<SearchResult, Error> {
+        // Not a filter on the rows, a refusal to ask: with music videos hidden there is no such
+        // thing as a video search, and the caller's shelf disappears on an empty list.
+        if self.hide_videos() {
+            return Ok(SearchResult { items: Vec::new() });
+        }
+        // No history: the search page already recorded this query with its other two searches.
+        let value = self.search_raw(metadata_client, query, Some(FILTER_VIDEO), false).await?;
+        Ok(metadata::parse_search(&value))
     }
 
     /// Unfiltered search → categorized sections (top / songs / albums / artists / playlists).
@@ -286,13 +305,26 @@ impl InnerTube {
             browse_id: browse_id.map(str::to_owned),
             params: params.map(str::to_owned),
         };
-        let value = self.post("browse", client, &body, true).await?;
-        // A stale cookie authenticates transport-wise but YouTube returns a logged-out "Sign in"
-        // state for account-scoped browse. Surface it as a clear error, not a blank page.
-        if self.is_logged_in() && browse::is_signed_out(&value) {
-            return Err(self.reject_session());
+        let mut healed = false;
+        loop {
+            let value = self.post("browse", client, &body, true).await?;
+
+            // A stale cookie authenticates transport-wise but YouTube returns a logged-out "Sign
+            // in" state for account-scoped browse. Same reasoning as the transport's 401: let the
+            // healer have a go and retry once before telling the user their session expired.
+            if self.is_logged_in() && browse::is_signed_out(&value) {
+                if !healed && !self.healing_suspended() {
+                    healed = true;
+                    tracing::warn!("InnerTube browse returned the signed-out state, healing");
+                    self.wait_for_session_heal().await?;
+                    tracing::info!("heal finished, retrying browse");
+                    continue;
+                }
+                return Err(self.reject_session());
+            }
+
+            return Ok(value);
         }
-        Ok(value)
     }
 
     /// POST a paging token. The ctoken is carried in the query, matching Metrolist's
@@ -328,7 +360,22 @@ impl InnerTube {
         browse_id: &str,
     ) -> Result<Vec<BrowseItem>, Error> {
         let value = self.browse(client, Some(browse_id), None).await?;
+        // A card the grid hands out twice is fatal on the UI side: every library list is keyed by
+        // browseId, and one repeat blanks the whole list (the sidebar, the Library page, the
+        // add-to-playlist picker) with an each_key_duplicate. Only libraries past the first page
+        // saw it, which is why removing a few playlists in YouTube Music "fixed" it. Issues #258,
+        // #260.
+        let mut seen = std::collections::HashSet::new();
+        let mut dropped = 0usize;
+        let mut keep = |items: &mut Vec<BrowseItem>| {
+            items.retain(|i: &BrowseItem| {
+                let fresh = seen.insert(i.id.clone());
+                dropped += usize::from(!fresh);
+                fresh
+            })
+        };
         let mut items = browse::parse_library(&value);
+        keep(&mut items);
         let mut token = browse::continuation_token(&value);
         // ponytail: page cap, so a token that never resolves can't spin forever. Raise it if
         // anyone turns up with a library past ~500 entries.
@@ -341,12 +388,27 @@ impl InnerTube {
             }) else {
                 break;
             };
-            let page = browse::parse_library(&value);
+            let mut page = browse::parse_library(&value);
             if page.is_empty() {
-                break; // a spurious token (some grids carry one that resolves to nothing)
+                // A spurious token: some grids carry one that resolves to nothing.
+                break;
             }
+            // Dedupe after the emptiness test, not before: a page that is entirely cards we
+            // already have still carries the token for the page after it, and that one can hold
+            // cards found nowhere else. A token that cycles is bounded by the self-reference
+            // filter below and by the page cap above.
+            keep(&mut page);
             items.extend(page);
             token = browse::continuation_token(&value).filter(|next| *next != t);
+        }
+        // Says so in a log the next reporter pastes: without it, a library that still looks wrong
+        // can't be told apart from one that was never duplicating in the first place.
+        if dropped > 0 {
+            tracing::warn!(
+                browse_id,
+                dropped,
+                "library grid repeated cards; kept the first of each"
+            );
         }
         Ok(items)
     }
@@ -385,6 +447,14 @@ impl InnerTube {
         }
         page.sections.retain(|s| !s.items.is_empty());
         Ok(page)
+    }
+
+    /// Moods & Genres (`FEmusic_moods_and_genres`): the tiles the search page browses from. A tile's
+    /// `params` opens its playlists via `browse_grid("FEmusic_moods_and_genres_category", ..)`.
+    /// Works signed out. context/08.
+    pub async fn moods(&self, client: &YouTubeClient) -> Result<Vec<MoodSection>, Error> {
+        let value = self.browse(client, Some("FEmusic_moods_and_genres"), None).await?;
+        Ok(browse::parse_moods(&value))
     }
 
     /// Play history (`FEmusic_history`), in YouTube's own date buckets (Today, Yesterday, …).
@@ -439,6 +509,10 @@ impl InnerTube {
     ) -> Result<PlaylistPage, Error> {
         let params = sort.map(|(s, desc)| s.params(desc));
         let value = self.browse(client, Some(browse_id), params).await?;
+        if let Some(show) = browse::podcast_show_id(browse_id, &value) {
+            let value = self.browse(client, Some(&show), params).await?;
+            return Ok(browse::parse_playlist(&value));
+        }
         Ok(browse::parse_playlist(&value))
     }
 
@@ -708,16 +782,35 @@ impl InnerTube {
         video_id: &str,
         set_video_id: &str,
     ) -> Result<(), Error> {
-        self.edit_playlist(
+        self.playlist_remove_many(
             client,
             playlist_id,
-            serde_json::json!({
-                "action": "ACTION_REMOVE_VIDEO",
-                "setVideoId": set_video_id,
-                "removedVideoId": video_id,
-            }),
+            &[(video_id.to_owned(), set_video_id.to_owned())],
         )
         .await
+    }
+
+    /// Remove several videos in one `edit_playlist` request: the endpoint takes an array of
+    /// actions, so a bulk removal is one round trip rather than one per track.
+    // ponytail: no chunking. YouTube has taken a few hundred actions in one body; split into
+    // batches here if a very long selection ever comes back rejected.
+    pub async fn playlist_remove_many(
+        &self,
+        client: &YouTubeClient,
+        playlist_id: &str,
+        tracks: &[(String, String)],
+    ) -> Result<(), Error> {
+        let actions = tracks
+            .iter()
+            .map(|(video_id, set_video_id)| {
+                serde_json::json!({
+                    "action": "ACTION_REMOVE_VIDEO",
+                    "setVideoId": set_video_id,
+                    "removedVideoId": video_id,
+                })
+            })
+            .collect();
+        self.edit_playlist_actions(client, playlist_id, actions).await
     }
 
     /// Store a sort order on a playlist you own, so every other client on the account shows the

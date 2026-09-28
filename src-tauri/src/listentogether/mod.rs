@@ -84,6 +84,13 @@ impl Status {
     }
 }
 
+/// The server a user gets when they have set none of their own. Kept out of the UI on purpose:
+/// the settings field seeds empty, `snapshot_of` reports it empty, and an invite minted on it is a
+/// bare room code, so nobody has to see (or retype) somebody else's hostname to listen together.
+/// An empty `server_url` means "this one", resolved at connect time in [`LtSession::run`], so
+/// clearing the field is how a self-hoster comes back to the default.
+const DEFAULT_SERVER: &str = "wss://fedora-1.tail9c4985.ts.net/ws";
+
 #[derive(Default)]
 struct Inner {
     status_connected: bool,
@@ -178,6 +185,11 @@ impl LtSession {
     pub async fn set_server_url(&self, url: String) {
         self.inner.lock().await.server_url = url;
         self.emit_state().await;
+    }
+
+    /// True when we're in a room in any role.
+    pub async fn in_room(&self) -> bool {
+        self.inner.lock().await.role != Role::None
     }
 
     /// True when we're a guest in a room — the caller should block local playback control.
@@ -308,10 +320,9 @@ impl LtSession {
             if self.gen.load(Ordering::SeqCst) != gen {
                 return;
             }
-            let url = self.inner.lock().await.server_url.clone();
+            let mut url = self.inner.lock().await.server_url.clone();
             if url.is_empty() {
-                self.close_locally("Set a server URL first (Listen Together settings).").await;
-                return;
+                url = DEFAULT_SERVER.to_string();
             }
             {
                 let mut inner = self.inner.lock().await;
@@ -664,6 +675,10 @@ impl LtSession {
             "roomCode": inner.room_code,
             "myId": inner.my_id,
             "serverUrl": inner.server_url,
+            // Sent so the settings panel can show what "the default" actually is once the user
+            // opens it. `serverUrl` stays empty until they pick their own, which is what keeps the
+            // address off every other screen.
+            "defaultServerUrl": DEFAULT_SERVER,
             "users": inner.users,
             "currentTrack": inner.current_track,
             "queue": inner.queue,

@@ -26,6 +26,7 @@
 	import {
 		addLocalFolder,
 		local,
+		openAddToPlaylist,
 		openPlayer,
 		playback,
 		removeLocalFolder,
@@ -217,11 +218,13 @@
 							<TrackRow
 								{song}
 								index={i}
+								lazy
 								active={song.video_id === nowId}
 								onplay={() => {
 									openPlayer();
 									api.playPlaylist(songs, i, undefined, SOURCE);
 								}}
+								onAdd={() => openAddToPlaylist(song)}
 							/>
 						{/each}
 					</div>

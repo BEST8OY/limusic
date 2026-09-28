@@ -322,7 +322,6 @@
 			<Shelf
 				title={section.title}
 				items={section.items}
-				headingClass="font-heading text-xl font-bold"
 				onMore={section.moreBrowseId ? () => showMore(section) : undefined}
 			/>
 		{/each}

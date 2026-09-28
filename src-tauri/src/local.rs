@@ -28,7 +28,7 @@ const FOLDERS_SETTING: &str = "local_folders";
 /// Bumped whenever `read_track` starts producing different titles, artists or album keys. The scan
 /// normally trusts stored rows whose file hasn't changed; after a bump it re-reads everything once,
 /// so a library isn't left half-parsed by the old rules and half by the new ones.
-const SCAN_VERSION: &str = "5";
+const SCAN_VERSION: &str = "7";
 const SCAN_VERSION_SETTING: &str = "local_scan_version";
 
 /// Extensions we pick up. Playback itself is mpv, which decodes far more than this — the list is
@@ -236,7 +236,7 @@ fn read_track(file: &Path, path: &str, mtime: i64, covers_dir: &Path) -> LocalTr
     let tagged_album = album.is_some();
     let (album, album_key) = match album {
         Some(a) => {
-            let key = album_key(album_artist.as_ref().unwrap_or(&artist), &a);
+            let key = tagged_album_key(&a, album_artist.as_deref(), dir);
             (a, key)
         }
         None => {
@@ -265,11 +265,20 @@ fn read_track(file: &Path, path: &str, mtime: i64, covers_dir: &Path) -> LocalTr
         album,
         album_key,
         album_artist,
-        track_no: tag.and_then(|t| t.track()).unwrap_or(0) as i64,
+        track_no: number(tag, &ItemKey::TrackNumber),
+        disc_no: number(tag, &ItemKey::DiscNumber),
         duration_secs,
         cover,
         mtime,
     }
+}
+
+/// A track or disc number, 0 when there is none. Read by hand because lofty's `track()` and
+/// `disk()` parse the whole string, and a FLAC tag often holds "1/2", which they read as nothing.
+fn number(tag: Option<&lofty::tag::Tag>, key: &ItemKey) -> i64 {
+    tag.and_then(|t| t.get_string(key))
+        .and_then(|s| s.split('/').next()?.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// "PARTYNEXTDOOR, Drake - CN TOWER" → (artist, title). Splits on the first " - " only, so
@@ -302,6 +311,19 @@ pub fn forget_missing(db: &Db, path: &str) -> Vec<String> {
         ids.push(artist_id_of(gone));
     }
     ids
+}
+
+/// Which key groups a tagged album. An AlbumArtist tag names the owner, guests and all (issue
+/// #96). Without one the folder does: keying on the per-track artist splits a compilation into one
+/// album per performer, which is issue #268.
+///
+/// ponytail: an untagged multi-disc rip in Disc 1/Disc 2 subfolders lists as two albums. Tag
+/// AlbumArtist, or walk up a folder when the name reads like a disc, if anyone reports it.
+fn tagged_album_key(album: &str, album_artist: Option<&str>, dir: Option<&Path>) -> String {
+    match album_artist {
+        Some(aa) => album_key(aa, album),
+        None => folder_key(dir, album),
+    }
 }
 
 /// A stable, readable album id: `artist--album`, sanitized to a safe filename (it doubles as the
@@ -454,6 +476,7 @@ fn albums_of(tracks: &[LocalTrack]) -> Vec<BrowseItem> {
                 )),
                 thumbnail: face.cover.clone(),
                 duration: None,
+                album_id: None,
                 artist_runs: Vec::new(),
                 play_count: None,
                 is_video: false,
@@ -506,6 +529,7 @@ fn artists_of(tracks: &[LocalTrack]) -> Vec<BrowseItem> {
                 // their own on disk, so a cover from their music is the closest thing.
                 thumbnail: ts.iter().find_map(|t| t.cover.clone()),
                 duration: None,
+                album_id: None,
                 artist_runs: Vec::new(),
                 play_count: None,
                 is_video: false,
@@ -678,6 +702,7 @@ mod tests {
             album_key: key.into(),
             album_artist: None,
             track_no: 1,
+            disc_no: 0,
             duration_secs: 10,
             cover: None,
             mtime: 1,
@@ -733,6 +758,26 @@ mod tests {
 
         let same = vec![track("/m/x/a.mp3", "Drake", "Views", "drake--views")];
         assert_eq!(albums_of(&same)[0].subtitle.as_deref(), Some("Drake • 1 song"));
+    }
+
+    #[test]
+    fn one_folder_of_one_album_is_one_album_whoever_performs_it() {
+        let dir = Path::new("/m/Guardians Vol. 2");
+        // No AlbumArtist tag: the folder groups them, so a compilation stays one album (#268).
+        assert_eq!(
+            tagged_album_key("Awesome Mix", None, Some(dir)),
+            tagged_album_key("Awesome Mix", None, Some(dir))
+        );
+        // Two different albums that share a title are still two albums.
+        assert_ne!(
+            tagged_album_key("Greatest Hits", None, Some(Path::new("/m/Queen"))),
+            tagged_album_key("Greatest Hits", None, Some(Path::new("/m/Abba")))
+        );
+        // A tagged AlbumArtist keeps the old id: it is persisted in Shortcuts.
+        assert_eq!(
+            tagged_album_key("Discovery", Some("Daft Punk"), Some(dir)),
+            "daft-punk--discovery"
+        );
     }
 
     #[test]
@@ -880,6 +925,94 @@ mod tests {
         );
         assert!(db.local_tracks(None).is_empty(), "and both rows are gone");
         assert!(forget_missing(&db, "/m/a.mp3").len() == 1, "forgetting twice is harmless");
+    }
+
+    #[test]
+    fn a_two_disc_album_plays_disc_by_disc() {
+        // Issue #315: both discs number from 1, so sorting on the track alone interleaved them.
+        let t = |path: &str, title: &str, disc: i64, n: i64| LocalTrack {
+            title: title.into(),
+            disc_no: disc,
+            track_no: n,
+            ..track(path, "Various", "Expeditions", "sasha--expeditions")
+        };
+        let titles = |tracks: &[LocalTrack]| {
+            let db = Db::open(Path::new(":memory:")).unwrap();
+            db.put_local_tracks(tracks);
+            let page = album_page(&db, "sasha--expeditions");
+            page.items.into_iter().map(|s| s.title).collect::<Vec<_>>()
+        };
+
+        // Tagged discs, all in one folder.
+        assert_eq!(
+            titles(&[
+                t("/m/2-01.flac", "Waters of Jericho", 2, 1),
+                t("/m/1-02.flac", "Stage One", 1, 2),
+                t("/m/1-01.flac", "Tyrantanic", 1, 1),
+                t("/m/2-02.flac", "Sexual Movement", 2, 2),
+            ]),
+            ["Tyrantanic", "Stage One", "Waters of Jericho", "Sexual Movement"]
+        );
+        // No disc tag, but a folder per disc.
+        assert_eq!(
+            titles(&[
+                t("/m/CD2/01.flac", "Waters of Jericho", 0, 1),
+                t("/m/CD1/02.flac", "Stage One", 0, 2),
+                t("/m/CD1/01.flac", "Tyrantanic", 0, 1),
+                t("/m/CD2/02.flac", "Sexual Movement", 0, 2),
+            ]),
+            ["Tyrantanic", "Stage One", "Waters of Jericho", "Sexual Movement"]
+        );
+    }
+
+    #[test]
+    fn two_albums_sharing_a_title_stay_apart() {
+        // Title then disc used to deal two two-disc "Greatest Hits" out a disc at a time.
+        let t = |path: &str, aa: Option<&str>, key: &str, disc: i64| LocalTrack {
+            album_artist: aa.map(Into::into),
+            disc_no: disc,
+            ..track(path, "x", "Greatest Hits", key)
+        };
+        let paths = |tracks: &[LocalTrack]| {
+            let db = Db::open(Path::new(":memory:")).unwrap();
+            db.put_local_tracks(tracks);
+            db.local_tracks(None).into_iter().map(|t| t.path).collect::<Vec<_>>()
+        };
+        let want = ["/a/1.flac", "/a/2.flac", "/q/1.flac", "/q/2.flac"];
+
+        let (abba, queen) = (Some("ABBA"), Some("Queen"));
+        assert_eq!(
+            paths(&[
+                t("/q/2.flac", queen, "queen--greatest-hits", 2),
+                t("/a/1.flac", abba, "abba--greatest-hits", 1),
+                t("/q/1.flac", queen, "queen--greatest-hits", 1),
+                t("/a/2.flac", abba, "abba--greatest-hits", 2),
+            ]),
+            want
+        );
+        // No album artist: the key is a folder digest, whose order means nothing, so the folder
+        // decides. These digests sort the other way round on purpose.
+        assert_eq!(
+            paths(&[
+                t("/q/2.flac", None, "dir-00-greatest-hits", 2),
+                t("/a/1.flac", None, "dir-ff-greatest-hits", 1),
+                t("/q/1.flac", None, "dir-00-greatest-hits", 1),
+                t("/a/2.flac", None, "dir-ff-greatest-hits", 2),
+            ]),
+            want
+        );
+    }
+
+    #[test]
+    fn numbers_read_through_a_total() {
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::VorbisComments);
+        tag.insert_text(ItemKey::DiscNumber, "2/2".into());
+        tag.insert_text(ItemKey::TrackNumber, " 07 ".into());
+        assert_eq!(number(Some(&tag), &ItemKey::DiscNumber), 2);
+        assert_eq!(number(Some(&tag), &ItemKey::TrackNumber), 7);
+        tag.insert_text(ItemKey::DiscNumber, "A".into());
+        assert_eq!(number(Some(&tag), &ItemKey::DiscNumber), 0, "junk reads as no disc");
+        assert_eq!(number(None, &ItemKey::DiscNumber), 0);
     }
 
     #[test]

@@ -104,11 +104,17 @@
 					: 'rounded-lg'}"
 			>
 				{#if item.thumbnail && attempt < 2 && !onRepeat}
+					<!-- No hover zoom (#341). On Chromium (WebView2) a transform transition is a
+					     composited animation, and each one starting or ending re-layerizes the whole
+					     page, so sweeping the pointer across a shelf did it on every card. Home top,
+					     perf/scroll.mjs at 4x CPU, hovering: 46-52% of frames over 20 ms in 1.0.0, 7-9%
+					     without this, StackCard's lift and the art-wash promotion. Fades are cheap
+					     enough to keep. -->
 					<img
 						{src}
 						{srcset}
 						alt=""
-						class="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-105"
+						class="h-full w-full object-cover"
 						loading="lazy"
 						draggable="false"
 						onerror={imgFailed}
@@ -135,10 +141,9 @@
 					</div>
 				{/if}
 				{#if item.kind !== 'artist'}
-					<!-- transition-[opacity,transform], not transition-all: opacity and translate are the
-					     only things that change, and both composite. -->
+					<!-- A fade only: the slide it used to have is a transform transition (see above). -->
 					<button
-						class="absolute flex translate-y-1 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground opacity-0 shadow-lg transition-[opacity,transform] duration-200 ease-out group-hover:translate-y-0 group-hover:opacity-100 focus-visible:opacity-100 {compact
+						class="absolute flex cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground opacity-0 shadow-lg transition-opacity duration-200 ease-out group-hover:opacity-100 focus-visible:opacity-100 {compact
 							? 'bottom-1.5 right-1.5 h-7 w-7'
 							: 'bottom-2 right-2 h-9 w-9'}"
 						class:animate-pulse={playing}

@@ -32,6 +32,14 @@ pub const ON_REPEAT_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
 /// How many songs it holds.
 pub const ON_REPEAT_LIMIT: usize = 20;
 
+/// A playlist kept on this machine (issue #251) is the browseId `LOCALPLAYLIST:<row id>`. Like On
+/// Repeat, the playlist commands intercept it and answer from SQLite, and YouTube never sees one.
+pub const LOCAL_PLAYLIST_PREFIX: &str = "LOCALPLAYLIST:";
+
+pub fn is_local_playlist(id: &str) -> bool {
+    id.starts_with(LOCAL_PLAYLIST_PREFIX)
+}
+
 pub struct AppState {
     pub it: InnerTube,
     pub clients: Clients,
@@ -294,9 +302,18 @@ struct QueueState {
     /// Human name of what seeded the queue (playlist/album title, "<song> Radio") — the queue
     /// panel's "Next from: …" header. Pure display metadata.
     source_name: Option<String>,
+    /// The playlist this queue was started from, exactly as the page passed it. What the player's
+    /// "Remove from this playlist" writes to, so the action only exists while a playlist is what
+    /// is actually playing. `None` for radios, single songs and a mirrored guest queue.
+    source_id: Option<String>,
     /// This queue is a radio: YouTube generated every upcoming track, so "Add to queue" replaces
     /// them rather than queueing behind an endless feed the user never asked to finish.
     radio: bool,
+    /// `play_song` is fetching this queue's radio right now (the generation it did it for). The
+    /// autoplay early trigger fires from `start_current` while such a queue is still its single
+    /// seed track, so without this hold both paths request the same `RDAMVM…` page at the same
+    /// moment and the queue ends up holding it twice (issue #255).
+    hydrating: Option<u64>,
     /// The queue index we've already appended to mpv for gapless lookahead (if any).
     lookahead_loaded: Option<usize>,
     /// Which client served the currently-loaded track (for the WEB_REMIX-403 feedback). context/06.
@@ -304,9 +321,13 @@ struct QueueState {
     /// The client that served the primed lookahead track — promoted to `current_client` on a
     /// gapless advance so the failure feedback still knows the client.
     lookahead_client: Option<String>,
-    /// Loudness gain (dB) for the primed lookahead. mpv's `af` is global, so this can't ride along
-    /// with the appended entry — it's applied when the gapless advance is observed.
-    lookahead_gain: Option<Option<f64>>,
+    /// Raw `loudnessDb` of the currently-loaded track, kept so toggling normalization can retune
+    /// what is already playing instead of waiting for the next one (#298).
+    current_loudness_db: Option<f64>,
+    /// Raw `loudnessDb` for the primed lookahead. mpv's `af` is global, so the gain can't ride
+    /// along with the appended entry: it's computed and applied when the gapless advance is
+    /// observed. Outer `Option` is "a lookahead is primed", inner is "YouTube told us a loudness".
+    lookahead_loudness_db: Option<Option<f64>>,
     /// Watch-history ping for the current track + the primed lookahead's (promoted on a gapless
     /// advance, mirroring current/lookahead_client). context/01 §registerPlayback.
     playback_ping: Option<PlaybackPing>,
@@ -319,6 +340,36 @@ struct QueueState {
     /// Last videoId we re-resolved after a playback failure — guards the one-shot retry in
     /// `on_track_failed` against a retry loop when the retried stream dies too.
     retried: Option<String>,
+    /// The queue this one replaced, for Previous at the head of a fresh queue.
+    prev_context: Option<PrevContext>,
+    /// Which queue this is. Bumped only when a different one replaces it (a playlist, a song, a
+    /// restored context, a Listen Together rebuild), never by a skip within it, unlike
+    /// `AppState::generation`, which moves on every load. `fill_playlist` checks this one: a skip
+    /// during the walk used to stop it for good, leaving a shuffled 4,000-track playlist playing
+    /// out of its first page or two (issue #316).
+    epoch: u64,
+}
+
+/// What was playing before a click replaced the whole queue, so Previous can go back to it.
+///
+/// Clicking a song outside the queue (a search result, a card) throws the queue away and starts a
+/// one-track one, which left Previous with nothing behind it to reach: it restarted a track the
+/// user had been listening to for two seconds. Keeping the outgoing queue means that press goes
+/// where they expect, and the restored queue still has its own order, shuffle and radio behind it.
+///
+/// ponytail: one level deep. Two presses don't walk back two contexts; make it a bounded Vec if
+/// anyone asks, the snapshot is already the whole of what a restore needs.
+struct PrevContext {
+    items: Vec<SongItem>,
+    current: usize,
+    played_from: usize,
+    shuffle_orig: Option<Vec<SongItem>>,
+    radio_seed: Option<String>,
+    source_name: Option<String>,
+    source_id: Option<String>,
+    radio: bool,
+    /// Where mpv had got to, so the track resumes instead of starting over.
+    position: f64,
 }
 
 impl QueueState {
@@ -332,6 +383,55 @@ impl QueueState {
         // one-retry marker can go stale. Without this it is "retried once, ever": a track that
         // was retried in the morning gets no retry tonight.
         self.retried = None;
+        // Past the head, Previous has a track of its own, and coming back to the head later (a
+        // repeat-all wrap, a click on the first row) must not swap this queue for a stale one.
+        if index > 0 {
+            self.prev_context = None;
+        }
+    }
+
+    /// Set this queue aside so Previous can come back to it. `position` is mpv's.
+    ///
+    /// Takes `items` and `shuffle_orig` rather than cloning them, so this may only be called from
+    /// a caller that replaces both immediately afterwards — which is exactly what a queue
+    /// replacement is. Anything that reads either field (`shuffle_orig.is_some()` for sticky
+    /// shuffle, `upcoming_queued` for the carried manual adds) has to read it before this.
+    fn keep_context(&mut self, position: f64) {
+        if self.items.is_empty() {
+            return;
+        }
+        // Clamped, so `restore_context` can index with it: a queue whose tail was trimmed under a
+        // pointer sitting on it would otherwise be a panic hours later, in an unrelated press.
+        let current = self.current.min(self.items.len() - 1);
+        self.prev_context = Some(PrevContext {
+            items: std::mem::take(&mut self.items),
+            current,
+            played_from: self.played_from.min(current),
+            shuffle_orig: self.shuffle_orig.take(),
+            radio_seed: self.radio_seed.take(),
+            source_name: self.source_name.take(),
+            source_id: self.source_id.take(),
+            radio: self.radio,
+            position,
+        });
+    }
+
+    /// Put a kept queue back. Returns the track to start and where to resume it.
+    fn restore_context(&mut self, prev: PrevContext) -> (String, f64) {
+        let video_id = prev.items[prev.current].video_id.clone();
+        self.items = prev.items;
+        self.epoch += 1;
+        self.current = prev.current;
+        self.played_from = prev.played_from;
+        self.shuffle_orig = prev.shuffle_orig;
+        self.radio_seed = prev.radio_seed;
+        self.source_name = prev.source_name;
+        self.source_id = prev.source_id;
+        self.radio = prev.radio;
+        self.lookahead_loaded = None; // mpv's primed next belongs to the queue we just dropped
+        self.hydrating = None; // as does any radio still being fetched for it
+        self.retried = None;
+        (video_id, prev.position)
     }
 }
 
@@ -435,7 +535,7 @@ impl AppState {
 
     /// User-disabled stream clients — comma-separated setting. Also the force-fail lever for the
     /// rustypipe-solo acceptance test; `LIMUSIC_DISABLED_CLIENTS` env overrides for quick testing.
-    fn disabled_clients(&self) -> HashSet<String> {
+    pub(crate) fn disabled_clients(&self) -> HashSet<String> {
         let raw = std::env::var("LIMUSIC_DISABLED_CLIENTS")
             .ok()
             .or_else(|| self.db.get_setting("disabled_stream_clients"))
@@ -455,6 +555,18 @@ impl AppState {
     /// session heal needs it: the user can switch accounts while it exports the jar, and signing
     /// in with what it found would drag them back to the account they just left.
     pub async fn sign_in(
+        &self,
+        cookie: String,
+        expect_account: Option<&str>,
+    ) -> Result<SignInOutcome, String> {
+        // Validating a cookie already in hand: a 401 here is the answer, not something to wait on
+        // a heal for. `refresh_session` also reaches `sign_in` while healing, and a wait there
+        // would park the healing task on the heal it is performing, holding `auth` for the whole
+        // timeout.
+        innertubex::without_healing(self.sign_in_inner(cookie, expect_account)).await
+    }
+
+    async fn sign_in_inner(
         &self,
         cookie: String,
         expect_account: Option<&str>,
@@ -667,6 +779,11 @@ impl AppState {
     /// account_menu must succeed under a one-off context for that exact identity before the shared
     /// transport, persistence, or UI is updated.
     pub async fn switch_account(&self, selection_key: &str) -> Result<serde_json::Value, String> {
+        // Same as `sign_in`: this validates an identity it was handed, so let it hear the answer.
+        innertubex::without_healing(self.switch_account_inner(selection_key)).await
+    }
+
+    async fn switch_account_inner(&self, selection_key: &str) -> Result<serde_json::Value, String> {
         let _turn = self.auth.lock().await;
         if !self.it.is_logged_in() {
             return Err("Sign in before switching channels.".into());
@@ -802,6 +919,12 @@ impl AppState {
     /// a dead session would leave the app half-logged-in. On success the transport, the
     /// projections and the UI all move together; on failure the previous session is left untouched.
     pub async fn switch_google_account(&self, id: &str) -> Result<serde_json::Value, String> {
+        // The stored cookie being stale is the expected failure here, and the caller rolls back
+        // on it. Waiting on a heal would only delay that by up to `HEAL_TIMEOUT`.
+        innertubex::without_healing(self.switch_google_account_inner(id)).await
+    }
+
+    async fn switch_google_account_inner(&self, id: &str) -> Result<serde_json::Value, String> {
         let _turn = self.auth.lock().await;
         let account = self.db.get_account(id).ok_or("That account is no longer saved.")?;
         let previous_cookie = self.it.cookie();
@@ -1011,11 +1134,20 @@ impl AppState {
         if let Some(c) = self.db.get_stream(video_id, cache_horizon(now, duration_secs)) {
             tracing::debug!(video_id, "stream url cache hit");
             // Cached URL carries no fresh metadata; the UI already has it from the queue item.
+            //
+            // The URL was validated under one client's User-Agent, so the replay sends the same
+            // one. An empty map (what this used to return) sent the audio proxy upstream as
+            // reqwest's default, and left mpv on the previous track's UA. `is_upload` is false by
+            // construction: upload URLs are never cached (see the write below).
+            let headers = match c.client.as_deref() {
+                Some(k) => self.orchestrator.headers_for(k, false),
+                None => Default::default(),
+            };
             return Ok(PlaybackData {
                 video_id: video_id.to_owned(),
                 stream_url: c.url,
                 itag: c.itag,
-                headers: Default::default(),
+                headers,
                 expires_in_seconds: c.expires_at - now,
                 loudness_db: c.loudness_db,
                 // Cached alongside the URL: a hit skips `/player`, so without it a replay never
@@ -1035,7 +1167,7 @@ impl AppState {
                 // the cache window (hours, and every track you just listened to) would fall back
                 // to the queue row's flag, which is exactly the thing that can't be trusted.
                 is_video: c.is_video,
-                stream_client: "cache".to_owned(),
+                stream_client: c.client.unwrap_or_else(|| "cache".to_owned()),
             });
         }
         let data = self
@@ -1058,6 +1190,7 @@ impl AppState {
                     is_video: data.is_video,
                     ping_url: data.playback_ping.as_ref().map(|p| p.url.clone()),
                     ping_client: data.playback_ping.as_ref().map(|p| p.client.clone()),
+                    client: Some(data.stream_client.clone()),
                 },
                 now,
             );
@@ -1066,7 +1199,7 @@ impl AppState {
     }
 
     /// Start a fresh queue from one track (a search-result click), then hydrate the radio via
-    /// `next` and prime the gapless lookahead.
+    /// `next` (skipped when autoplay is off) and prime the gapless lookahead.
     pub async fn play_song(self: &std::sync::Arc<Self>, seed: SongItem) {
         if self.lt.is_guest().await {
             // Guests follow the host; clicking a song adds it to the shared queue instead
@@ -1078,34 +1211,46 @@ impl AppState {
         let video_id = seed.video_id.clone();
         let sticky = self.sticky_shuffle();
 
+        // A local file isn't a videoId YouTube has ever heard of: it has no radio, and asking for
+        // one offline (where local music earns its keep) is a guaranteed-failing request.
+        // Autoplay off means the song plays and the queue ends there (#238): the radio hydrated
+        // below is exactly the "recommended tracks" that setting turns off.
+        let no_radio = crate::local::is_local_song(&video_id) || !self.autoplay_enabled();
+        let position = self.current_position();
+
         {
             let mut q = self.queue.lock().await;
             // Unplayed manual adds survive a context switch (Spotify semantics): they follow the
             // new track, ahead of its radio (hydration appends behind them).
             let mut carried = upcoming_queued(&q.items, q.current);
-            // A local file has no radio behind it (see below), so don't promise one in the header.
-            q.source_name = (!crate::local::is_local_song(&seed.video_id))
-                .then(|| format!("{} Radio", seed.title));
+            // Both of these read what `keep_context` is about to take, so they go before it.
+            let shuffled = q.shuffle_orig.is_some();
+            q.keep_context(position);
+            // No radio behind it, so don't promise one in the header.
+            q.source_name = (!no_radio).then(|| format!("{} Radio", seed.title));
             q.items = vec![seed];
             q.items.append(&mut carried);
+            q.epoch += 1;
             q.current = 0;
             q.played_from = 0; // new queue, nothing played in it yet
             q.lookahead_loaded = None;
             q.radio_seed = None; // single-song queue → autoplay re-seeds from the last track
+            q.source_id = None;
             q.radio = false;
+            // Hold off the autoplay early trigger `start_current` is about to spawn: this queue is
+            // one track long, so it would fetch the very radio being hydrated below (#255).
+            q.hydrating = (!no_radio).then_some(gen);
             // Shuffle carries into the new queue only when it's sticky (re-snapshotted after
             // radio hydration); otherwise a new context starts unshuffled.
-            q.shuffle_orig = (sticky && q.shuffle_orig.is_some()).then(|| q.items.clone());
+            q.shuffle_orig = (sticky && shuffled).then(|| q.items.clone());
         }
 
         if !self.start_current(gen).await {
+            self.end_hydration(gen).await;
             return;
         }
 
-        // A local file isn't a videoId YouTube has ever heard of: asking for its radio is a
-        // guaranteed-useless request, and offline (where local music earns its keep) it's a
-        // guaranteed-failing one.
-        if crate::local::is_local_song(&video_id) {
+        if no_radio {
             self.prime_lookahead(gen).await;
             return;
         }
@@ -1114,24 +1259,49 @@ impl AppState {
         // directly (`RDAMVM<videoId>`): a bare next(videoId) returns only the seed song + an
         // automixPreviewVideoRenderer, so the queue would never grow past one track.
         let radio_id = format!("RDAMVM{video_id}");
-        match self
+        let hydrated = self
             .it
             .next(
                 self.clients.get(innertubex::METADATA_CLIENT).unwrap(),
                 Some(&video_id),
                 Some(&radio_id),
             )
-            .await
-        {
+            .await;
+        self.end_hydration(gen).await; // autoplay may top this queue up from here on
+        match hydrated {
             Ok(next) => {
                 let mut q = self.queue.lock().await;
                 if self.generation.load(Ordering::SeqCst) != gen {
                     return; // superseded
                 }
+                // Deduped against the queue, not just against the seed: a carried manual add can
+                // be in the radio page too, and it should stay where the user put it.
+                let mut seen: HashSet<String> =
+                    q.items.iter().map(|i| i.video_id.clone()).collect();
+                let had_album = q.items.get(q.current).is_some_and(|i| i.album.is_some());
                 for item in next.items {
-                    if item.video_id != video_id {
+                    if seen.insert(item.video_id.clone()) {
                         q.items.push(item);
+                    } else if let Some(have) =
+                        q.items.iter_mut().find(|i| i.video_id == item.video_id)
+                    {
+                        // Search and home cards carry no album name; the radio's own row for the
+                        // same track does (#309).
+                        have.album = have.album.take().or(item.album);
                     }
+                }
+                // The seed is already playing and Last.fm and Discord were told it has no album.
+                // Sent under the queue lock, so it can't overtake the next track's `set_track`.
+                if let Some(album) = q
+                    .items
+                    .get(q.current)
+                    .filter(|i| !had_album && i.video_id == video_id)
+                    .and_then(|i| i.album.as_deref())
+                {
+                    if let Some(d) = &self.discord {
+                        d.set_album(&video_id, album);
+                    }
+                    self.lastfm.set_album(&video_id, album);
                 }
                 // Shuffle on → the radio hydration is part of the queue: snapshot it as the
                 // "original" order, then shuffle the upcoming tracks. (Runs before the lookahead
@@ -1183,8 +1353,9 @@ impl AppState {
         // A mix has no "rest of the playlist" worth walking (see `is_mix`) — drop the token.
         let continuation = continuation.filter(|_| !is_mix(source_id.as_deref()));
         let sticky = self.sticky_shuffle();
+        let position = self.current_position();
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        {
+        let epoch = {
             let mut q = self.queue.lock().await;
             // Explicitly requested by a page Shuffle button, or already on and set to stick
             // across queues (issue #117: off by default, so an album opened while shuffle is on
@@ -1200,12 +1371,17 @@ impl AppState {
             // Unplayed manual adds survive a context switch (Spotify semantics) — spliced back in
             // right after the new current track, ahead of the new context.
             let carried = upcoming_queued(&q.items, q.current);
+            // After `keep_shuffled` and `carried`, both of which read what this takes.
+            q.keep_context(position);
             q.items = items;
+            q.epoch += 1;
             q.current = start;
             q.lookahead_loaded = None;
+            q.source_id = source_id.clone();
             q.radio_seed = radio_seed_for(source_id);
             q.source_name = source_name;
             q.radio = false; // a chosen playlist/album; `start_radio` sets it back on for its own
+            q.hydrating = None; // a `play_song` radio still in flight is for a queue that's gone
             if keep_shuffled {
                 // Snapshot the real playlist order (for un-shuffle), then play the clicked track
                 // first with everything else shuffled behind it. Carried adds are spliced in
@@ -1224,14 +1400,15 @@ impl AppState {
             for (k, item) in carried.into_iter().enumerate() {
                 q.items.insert(at + k, item);
             }
-        }
+            q.epoch
+        };
         // start_current emits now-playing + queue + persists; prime the gapless lookahead after.
         if self.start_current(gen).await {
             self.prime_lookahead(gen).await;
         }
         if let Some(token) = continuation {
             let me = self.clone();
-            tokio::spawn(async move { me.fill_playlist(gen, token, Fill::Playing).await });
+            tokio::spawn(async move { me.fill_playlist(epoch, gen, token, Fill::Playing).await });
         }
     }
 
@@ -1261,6 +1438,7 @@ impl AppState {
             || id.starts_with(crate::local::ALBUM_PREFIX)
             || id.starts_with(crate::local::ARTIST_PREFIX)
             || id == ON_REPEAT_ID
+            || is_local_playlist(id)
         {
             return Err("This has no radio behind it.".into());
         }
@@ -1392,9 +1570,17 @@ impl AppState {
     /// ([`append_page`]), so the only track not drawn from the full playlist is the one already
     /// playing — and the walk is long finished before it ends.
     ///
-    /// Guarded by `gen`: if the user starts something else mid-walk, the pages are dropped rather
-    /// than appended to a queue they don't belong to. [`Fill`] says which queue the pages join.
-    async fn fill_playlist(self: &std::sync::Arc<Self>, gen: u64, mut token: String, fill: Fill) {
+    /// Guarded by `epoch` ([`QueueState::epoch`]): if the user starts something else mid-walk, the
+    /// pages are dropped rather than appended to a queue they don't belong to. Skipping around
+    /// inside this queue doesn't stop it. `gen` is the load the walk started under, only for
+    /// priming. [`Fill`] says which queue the pages join.
+    async fn fill_playlist(
+        self: &std::sync::Arc<Self>,
+        epoch: u64,
+        gen: u64,
+        mut token: String,
+        fill: Fill,
+    ) {
         // ponytail: ~5k tracks at 100/page. A bound so a playlist that keeps handing out tokens
         // can't walk forever; raise it if a real playlist ever hits the cap.
         const MAX_PAGES: usize = 50;
@@ -1414,9 +1600,6 @@ impl AppState {
                     break;
                 }
             };
-            if self.generation.load(Ordering::SeqCst) != gen {
-                return; // another queue owns the state now — don't touch it, don't persist
-            }
             if page.items.is_empty() {
                 break; // an empty page is the end, token or not
             }
@@ -1431,6 +1614,9 @@ impl AppState {
             }
             {
                 let mut q = self.queue.lock().await;
+                if q.epoch != epoch {
+                    return; // another queue owns the state now: don't touch it, don't persist
+                }
                 append_page(&mut q, items, matches!(fill, Fill::Playing));
                 // An append can retarget a primed repeat-all wrap (index 0 → the new tail); drop
                 // the lookahead when it stops pointing at what plays next, same check as
@@ -1447,7 +1633,15 @@ impl AppState {
                 last_emit = Some(std::time::Instant::now());
                 self.emit_queue().await;
             }
-            self.prime_lookahead(gen).await;
+            // Only while nothing has been skipped since the walk began. A skip loads its own track
+            // and primes behind it; priming while that load is still resolving hands mpv a next
+            // entry for a playlist `loadfile` is about to replace.
+            // ponytail: after a skip the walk stops re-priming, so a page that lands behind a
+            // current track that was the last one gets no gapless handoff (the track-end fallback
+            // loads it instead). Re-prime once the skip's load has settled if that gap matters.
+            if self.generation.load(Ordering::SeqCst) == gen {
+                self.prime_lookahead(gen).await;
+            }
             match page.continuation {
                 Some(next) => token = next,
                 None => break,
@@ -1538,7 +1732,8 @@ impl AppState {
                 if me.extend_queue_radio(gen).await > 0 {
                     {
                         let mut q = me.queue.lock().await;
-                        q.current += 1; // the first appended track
+                        let next = q.current + 1; // the first appended track
+                        q.seek_to(next);
                         q.lookahead_loaded = None; // start_current's loadfile replaces mpv's playlist
                     }
                     if me.start_current(gen).await {
@@ -1580,8 +1775,9 @@ impl AppState {
             let mut q = self.queue.lock().await;
             // `af` is global in mpv and the appended entry couldn't carry its own, so the new track
             // is playing at the *previous* one's gain until this lands.
-            if let Some(gain) = q.lookahead_gain.take() {
-                if let Err(e) = self.player.set_gain(gain) {
+            if let Some(loudness) = q.lookahead_loudness_db.take() {
+                q.current_loudness_db = loudness;
+                if let Err(e) = self.player.set_gain(self.track_gain(loudness)) {
                     tracing::warn!(error = %e, "applying lookahead loudness gain failed");
                 }
             }
@@ -1618,7 +1814,7 @@ impl AppState {
         });
     }
 
-    /// Which client's URL the playing track was resolved from ("WEB_REMIX", "cache", ...).
+    /// Which client's URL the playing track was resolved from ("WEB_REMIX", "VISIONOS", ...).
     /// Names the culprit in a playback-error toast, which on Windows is the only diagnostic a
     /// reporter can actually produce.
     pub async fn current_stream_client(&self) -> Option<String> {
@@ -1678,6 +1874,50 @@ impl AppState {
         false
     }
 
+    /// The audio device went away under a loaded file (a PC waking from sleep re-enumerates its
+    /// devices, or one was unplugged). mpv ends the file with an error exactly like a dead URL
+    /// does, and routing it through `on_track_failed` is what made a sleeping PC wake up playing
+    /// music by itself: the retry evicted a perfectly good stream URL, `start_current` ends with an
+    /// unconditional `play()` so the user's pause was thrown away, the device was still missing so
+    /// the next track failed the same way, and the app walked the queue (scrobbling each track it
+    /// touched) until the device came back and one of those `play()` calls stuck. Issue #267.
+    ///
+    /// Nothing is wrong with the stream, so stay exactly where we are. mpv is idle now, so the
+    /// remembered position is what `resume_or_toggle` reloads at when the user presses play.
+    pub async fn on_audio_device_lost(&self) {
+        let pos = self.current_position();
+        // Read the position first: this empties mpv's playlist, which resets `time-pos`.
+        //
+        // The file died, the *playlist* didn't. mpv runs with no `keep-open` and with
+        // `prefetch-playlist`, so it moves straight on to the appended gapless lookahead and
+        // tries it too. If the device came back in between (a PipeWire restart, a Bluetooth
+        // blip) that track starts playing, unpaused, while the queue still points at this one:
+        // the same "woke up playing music by itself" the retry path used to cause.
+        let _ = self.player.stop();
+        let mut q = self.queue.lock().await;
+        q.lookahead_loaded = None;
+        if let Some(item) = q.items.get(q.current) {
+            if q.duration > 0.0 && pos > 1.0 && pos < q.duration {
+                *self.pending_seek.lock().unwrap() = Some((item.video_id.clone(), pos));
+            }
+        }
+    }
+
+    /// The crossfade lookahead's track failed to open. The current track is unaffected, so the queue
+    /// and transport stay put; clearing `lookahead_loaded` makes `on_track_ended` load the next
+    /// track explicitly, and evicting its URL stops the cache serving it again (for hours) to fail
+    /// in front of the user.
+    pub async fn on_lookahead_failed(&self) {
+        let video_id = {
+            let mut q = self.queue.lock().await;
+            let idx = q.lookahead_loaded.take();
+            idx.and_then(|i| q.items.get(i)).map(|item| item.video_id.clone())
+        };
+        let Some(video_id) = video_id else { return };
+        tracing::warn!(video_id = %video_id, "lookahead stream died, evicting its cached URL");
+        self.db.evict_stream(&video_id);
+    }
+
     /// Resolve + load the current track into mpv (replace). Returns false if resolve failed or the
     /// request was superseded.
     async fn start_current(self: &std::sync::Arc<Self>, gen: u64) -> bool {
@@ -1735,6 +1975,14 @@ impl AppState {
                         return false;
                     }
                 }
+                Err(e) if e.affects_every_track() => {
+                    // Nothing is wrong with this track: the network is down, or YouTube is
+                    // refusing every anonymous client right now. Skipping would walk the whole
+                    // queue in a couple of seconds, toast once per track and persist the new
+                    // position, so stay exactly where we are and say what happened.
+                    self.emit_error(&item.video_id, &e.to_string());
+                    return false;
+                }
                 Err(e) => {
                     let mut q = self.queue.lock().await;
                     // Deliberately ignores repeat-all: wrapping the unplayable-skip would spin
@@ -1744,7 +1992,8 @@ impl AppState {
                         self.emit_error(&item.video_id, &e.to_string()); // nothing left to skip to
                         return false;
                     }
-                    q.current += 1;
+                    let next = q.current + 1;
+                    q.seek_to(next);
                     q.lookahead_loaded = None;
                     drop(q);
                     self.emit_skip(&item.title, skip_reason(&e));
@@ -1755,18 +2004,11 @@ impl AppState {
         if self.generation.load(Ordering::SeqCst) != gen {
             return false; // user moved on
         }
-        if let Err(e) =
-            self.player.load(&data.stream_url, &data.headers, loudness_gain(data.loudness_db))
-        {
-            self.emit_error(&item.video_id, &e.to_string());
-            return false;
-        }
-        let _ = self.player.play();
         // Resume a restored position, but only for the exact track it was saved against (any first
-        // play consumes it, so jumping elsewhere doesn't inherit it). mpv queues an absolute seek
-        // issued right after loadfile and applies it when the file loads.
-        // ponytail: if resume-position proves flaky on some mpv build, switch to the loadfile
-        // `start=` option instead of a post-load seek.
+        // play consumes it, so jumping elsewhere doesn't inherit it). This is handed to `loadfile`
+        // as `start=`, not issued as a seek afterwards: mpv does *not* queue a seek that arrives
+        // before the file is loaded. It fails with MPV_ERROR_COMMAND and playback starts at 0, so
+        // a restored position and a failed-track retry both lost their offset (issue #188).
         let seek = self
             .pending_seek
             .lock()
@@ -1774,9 +2016,14 @@ impl AppState {
             .take()
             .filter(|(vid, _)| *vid == item.video_id)
             .map(|(_, pos)| pos);
-        if let Some(pos) = seek {
-            let _ = self.player.seek(pos);
+        let stream_url = mpv_stream_url(&data);
+        if let Err(e) =
+            self.player.load(&stream_url, &data.headers, self.track_gain(data.loudness_db), seek)
+        {
+            self.emit_error(&item.video_id, &e.to_string());
+            return false;
         }
+        let _ = self.player.play();
         let start_pos = seek.unwrap_or(0.0);
         self.latest_position.store(start_pos.to_bits(), Ordering::SeqCst);
         // Items played from cards/radio can arrive without a duration; the player response knows
@@ -1791,6 +2038,7 @@ impl AppState {
         {
             let mut q = self.queue.lock().await;
             q.current_client = Some(data.stream_client.clone());
+            q.current_loudness_db = data.loudness_db;
             // Fresh play → fresh history state (context/01 §registerPlayback).
             q.playback_ping = data.playback_ping.clone();
             q.cpn = innertubex::generate_cpn();
@@ -1866,7 +2114,15 @@ impl AppState {
                     return;
                 }
                 Err(e) => {
-                    tracing::warn!(video_id = %next_video, error = %e, "lookahead resolve failed — dropping from queue");
+                    if e.affects_every_track() {
+                        // The next track is fine; we just cannot reach YouTube. Removing it here
+                        // would delete a good row from the persisted queue, and the retry loop
+                        // would do it again to the row that moved up. Leave the queue alone and
+                        // let the next prime try again.
+                        tracing::warn!(video_id = %next_video, error = %e, "lookahead resolve failed, leaving the queue alone");
+                        return;
+                    }
+                    tracing::warn!(video_id = %next_video, error = %e, "lookahead resolve failed, dropping from queue");
                     if self.generation.load(Ordering::SeqCst) != gen {
                         return;
                     }
@@ -1922,13 +2178,13 @@ impl AppState {
         }
         // Headers are global in mpv; the direct-URL clients need none beyond UA, which the
         // current track already set. Just append the URL.
-        if let Err(e) = self.player.enqueue(&data.stream_url) {
+        if let Err(e) = self.player.enqueue(&mpv_stream_url(&data)) {
             tracing::warn!(error = %e, "enqueue lookahead failed");
             return;
         }
         q.lookahead_loaded = Some(next_idx);
         q.lookahead_client = Some(data.stream_client.clone());
-        q.lookahead_gain = Some(loudness_gain(data.loudness_db));
+        q.lookahead_loudness_db = Some(data.loudness_db);
         q.lookahead_playback_ping = data.playback_ping.clone();
         // Same backfill as start_current: a gapless advance emits this item straight from the
         // queue, so the repair has to land before it becomes the current track.
@@ -1941,6 +2197,24 @@ impl AppState {
     async fn current_item(&self) -> Option<SongItem> {
         let q = self.queue.lock().await;
         q.items.get(q.current).cloned()
+    }
+
+    /// [`loudness_gain`] for one track, honouring the `normalize_volume` setting. Off means mpv
+    /// gets no `af` at all, so the master plays exactly as mastered: no attenuation, no boost and
+    /// no limiter (#298). Every load path routes through here, so the switch cannot half-apply.
+    fn track_gain(&self, loudness_db: Option<f64>) -> Option<f64> {
+        (self.db.get_setting("normalize_volume").as_deref() != Some("false"))
+            .then(|| loudness_gain(loudness_db))
+            .flatten()
+    }
+
+    /// Retune what is already playing after the `normalize_volume` switch moved. The point of the
+    /// setting is hearing the same track both ways, so it cannot wait for the next track change.
+    pub(crate) async fn reapply_gain(&self) {
+        let loudness = self.queue.lock().await.current_loudness_db;
+        if let Err(e) = self.player.set_gain(self.track_gain(loudness)) {
+            tracing::warn!(error = %e, "reapplying loudness gain failed");
+        }
     }
 
     // --- events (context/11 UI contract) ----------------------------------------------------
@@ -1958,6 +2232,9 @@ impl AppState {
             "artistRuns": item.artist_runs,
             "thumbnail": item.thumbnail,
             "duration": item.duration,
+            // The lyrics fetch needs it on a gapless advance, where the queue event that would
+            // carry it lands after this one.
+            "album": item.album,
             "streamClient": stream_client,
             "rating": item.rating,
             // YouTube's own `musicVideoType` says this track is a video upload, not the generated
@@ -2263,8 +2540,50 @@ impl AppState {
             let _ = self.user_seek(0.0).await;
             return;
         }
+        // Nothing in front of the head of the queue, so the last thing actually played is in
+        // whatever this queue replaced. Falls through to the restart below when there is none.
+        if self.restore_prev_context().await {
+            return;
+        }
         let i = self.queue.lock().await.current.saturating_sub(1);
         self.play_index(i).await;
+    }
+
+    /// Previous at the head of a queue that replaced another one: put that one back, at the track
+    /// and position it was left at. Returns whether it happened.
+    ///
+    /// Only from the head. Anywhere else Previous has a track of its own to step back to, and the
+    /// queue panel shows that order, so stepping somewhere it doesn't show would be a surprise.
+    ///
+    /// Also the queue panel's "Back to …" line (`prev_track_title`), which is why this is public:
+    /// that button isn't Previous, so it works however long the new track has been playing.
+    pub async fn restore_prev_context(self: &std::sync::Arc<Self>) -> bool {
+        if self.lt.is_guest().await {
+            return false; // host-driven; the fall-through hits `play_index`, which says so
+        }
+        let prev = {
+            let mut q = self.queue.lock().await;
+            if q.current != 0 {
+                return false;
+            }
+            match q.prev_context.take() {
+                Some(prev) => prev,
+                None => return false,
+            }
+        };
+        let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let (video_id, position) = self.queue.lock().await.restore_context(prev);
+        // `start_current` consumes this, and only for this exact track.
+        if position > 1.0 {
+            *self.pending_seek.lock().unwrap() = Some((video_id, position));
+        }
+        // Same reason as `play_index`: until mpv ticks, `current_position` would still be
+        // reporting the track we just left.
+        self.latest_position.store(0f64.to_bits(), Ordering::SeqCst);
+        if self.start_current(gen).await {
+            self.prime_lookahead(gen).await;
+        }
+        true
     }
 
     /// Tell the UI the queue changed.
@@ -2287,6 +2606,8 @@ impl AppState {
                 "shuffle": q.shuffle_orig.is_some(),
                 "repeat": q.repeat,
                 "sourceName": &q.source_name,
+                "sourceId": &q.source_id,
+                "prevTrack": prev_track_title(&q),
                 // The playing row, so `start_current`'s duration/artists backfill still reaches
                 // the panel without shipping the other 4,999 rows to carry it.
                 "current": q.items.get(q.current),
@@ -2299,6 +2620,8 @@ impl AppState {
                 "shuffle": q.shuffle_orig.is_some(),
                 "repeat": q.repeat,
                 "sourceName": &q.source_name,
+                "sourceId": &q.source_id,
+                "prevTrack": prev_track_title(&q),
             })
         };
         let _ = self.app.emit(if unchanged { "queue-index" } else { "queue-changed" }, payload);
@@ -2368,6 +2691,8 @@ impl AppState {
             "shuffle": q.shuffle_orig.is_some(),
             "repeat": q.repeat,
             "sourceName": &q.source_name,
+            "sourceId": &q.source_id,
+            "prevTrack": prev_track_title(&q),
         })
     }
 
@@ -2487,6 +2812,15 @@ impl AppState {
         self.db.get_setting("autoplay").map(|v| v != "false").unwrap_or(true)
     }
 
+    /// Lift the hold `play_song` put on the autoplay trigger while it hydrated a radio, unless a
+    /// newer queue has taken it over in the meantime (its own `play_song` clears it).
+    async fn end_hydration(&self, gen: u64) {
+        let mut q = self.queue.lock().await;
+        if q.hydrating == Some(gen) {
+            q.hydrating = None;
+        }
+    }
+
     /// Extend the queue with radio continuation when it's nearly out (autoplay). Returns how many
     /// tracks were appended. Guards: setting on, repeat Off, not a guest, tail near (last two
     /// tracks), generation unchanged across the network call. Continuation matches where the queue
@@ -2498,8 +2832,15 @@ impl AppState {
         if !self.autoplay_enabled() || self.lt.is_guest().await {
             return 0;
         }
-        let (last_video, seed, existing) = {
+        let (last_video, seed) = {
             let q = self.queue.lock().await;
+            if q.hydrating == Some(gen) {
+                // This queue's own `play_song` is already fetching its radio (#255). Keyed to the
+                // generation: a marker left by a queue that has since been replaced (`play_index`
+                // and the other load paths bump the generation without clearing it) must not stop
+                // the new queue from topping itself up.
+                return 0;
+            }
             if q.repeat != RepeatMode::Off {
                 return 0; // the queue never exhausts under repeat
             }
@@ -2513,13 +2854,12 @@ impl AppState {
                 return 0;
             }
             let seed = q.radio_seed.clone().unwrap_or_else(|| format!("RDAMVM{}", last.video_id));
-            let existing: HashSet<String> = q.items.iter().map(|i| i.video_id.clone()).collect();
-            (last.video_id.clone(), seed, existing)
+            (last.video_id.clone(), seed)
         };
         let Some(client) = self.clients.get(innertubex::METADATA_CLIENT) else { return 0 };
-        // Snapshot → network → re-lock, same discipline as `prime_lookahead`; the generation
-        // check between them is what makes it safe. A track added *during* the fetch could
-        // theoretically duplicate — accepted (YTM's own radio repeats occasionally too).
+        // Snapshot → network → re-lock, same discipline as `prime_lookahead`; the generation check
+        // between them is what makes it safe, and `absorb_radio` dedupes against the queue as it
+        // is after the fetch, so whatever grew it meanwhile can't come back as a duplicate.
         let fresh = match self.it.next(client, Some(&last_video), Some(&seed)).await {
             Ok(next) => next.items,
             Err(e) => {
@@ -2527,7 +2867,7 @@ impl AppState {
                 return 0;
             }
         };
-        let added = self.absorb_radio(fresh, existing.clone(), gen, &seed, AUTOPLAY_BATCH).await;
+        let added = self.absorb_radio(fresh, gen, &seed, AUTOPLAY_BATCH).await;
         if added > 0 {
             return added;
         }
@@ -2546,7 +2886,7 @@ impl AppState {
         let Ok((fresh, seed)) = self.fetch_radio(Some(&last_video), &song_seed).await else {
             return 0;
         };
-        self.absorb_radio(fresh, existing, gen, &seed, AUTOPLAY_BATCH).await
+        self.absorb_radio(fresh, gen, &seed, AUTOPLAY_BATCH).await
     }
 
     /// Append a fetched radio page to the tail of the queue and run the bookkeeping that follows.
@@ -2555,7 +2895,6 @@ impl AppState {
     async fn absorb_radio(
         self: &std::sync::Arc<Self>,
         fresh: Vec<SongItem>,
-        existing: HashSet<String>,
         gen: u64,
         seed: &str,
         cap: usize,
@@ -2565,6 +2904,10 @@ impl AppState {
         }
         let (added, trimmed) = {
             let mut q = self.queue.lock().await;
+            // Against the queue as it is *now*, not a snapshot from before the fetch: a playlist
+            // fill, a guest add or `play_song`'s own hydration can all have appended something
+            // while we were on the network, and dropping a stale set on top of it duplicates.
+            let existing: HashSet<String> = q.items.iter().map(|i| i.video_id.clone()).collect();
             let added = merge_radio(&mut q.items, fresh, existing, cap);
             // Not while shuffle is on: `shuffle_orig` is a parallel clone of the list and rebasing
             // both consistently is a bigger change than this one. Deliberate, see plan 039.
@@ -2635,6 +2978,7 @@ impl AppState {
                     "shuffleOrig": &q.shuffle_orig,
                     "radioSeed": &q.radio_seed,
                     "sourceName": &q.source_name,
+                    "sourceId": &q.source_id,
                     "radio": q.radio,
                 })
                 .to_string()
@@ -2678,6 +3022,8 @@ impl AppState {
             saved.get("radioSeed").and_then(|v| v.as_str()).map(str::to_owned);
         let source_name: Option<String> =
             saved.get("sourceName").and_then(|v| v.as_str()).map(str::to_owned);
+        let source_id: Option<String> =
+            saved.get("sourceId").and_then(|v| v.as_str()).map(str::to_owned);
         let radio = saved.get("radio").and_then(|v| v.as_bool()).unwrap_or(false);
         // `queue_index` is rewritten on every persist while `queue_json` is only rewritten when
         // the rows change, so on an advance it is the fresher of the two. But the two are separate
@@ -2720,6 +3066,7 @@ impl AppState {
             q.shuffle_orig = shuffle_orig;
             q.radio_seed = radio_seed;
             q.source_name = source_name;
+            q.source_id = source_id;
             q.radio = radio;
         }
         if repeat == RepeatMode::One {
@@ -2808,9 +3155,18 @@ impl AppState {
     /// host seeding. See `crate::listentogether`.
     pub async fn apply_sync(self: &std::sync::Arc<Self>, cmd: SyncCommand) {
         match cmd {
-            SyncCommand::HostSeed => self.lt_host_seed().await,
-            SyncCommand::Release => {} // role already flipped; nothing to undo
-            SyncCommand::ApplyState(state) => self.lt_apply_state(state).await,
+            SyncCommand::HostSeed => {
+                self.apply_crossfade().await;
+                self.lt_host_seed().await
+            }
+            // Role already flipped; nothing to undo. Not always a *leave*: a promotion to host
+            // sends one too, which is why `apply_crossfade` re-reads the role instead of
+            // assuming this means the room is over.
+            SyncCommand::Release => self.apply_crossfade().await,
+            SyncCommand::ApplyState(state) => {
+                self.apply_crossfade().await;
+                self.lt_apply_state(state).await
+            }
             SyncCommand::ChangeTrack { track, position_ms, playing, queue } => {
                 self.lt_apply_change_track(track, position_ms, playing, queue).await
             }
@@ -2877,12 +3233,16 @@ impl AppState {
             let mut items = vec![track_to_song(&track)];
             items.extend(upcoming.iter().map(track_to_song));
             q.items = items;
+            q.epoch += 1;
             q.current = 0;
             q.played_from = 0; // the host's queue starts at the track it sent; no local history
+                               // Nor does Previous reach back past the session into a queue from before joining.
+            q.prev_context = None;
             q.lookahead_loaded = None;
             q.shuffle_orig = None; // host rebuilt the queue — local shuffle snapshot is stale
             q.radio_seed = None; // guests never autoplay — the host drives
             q.source_name = None; // the host's context isn't known — header falls back
+            q.source_id = None;
         }
         // A Listen Together track is the host's; `Track` carries no upload flag and a guest could
         // not stream someone else's upload anyway.
@@ -2896,21 +3256,23 @@ impl AppState {
         if self.generation.load(Ordering::SeqCst) != gen {
             return; // superseded by a newer sync
         }
-        if let Err(e) =
-            self.player.load(&data.stream_url, &data.headers, loudness_gain(data.loudness_db))
-        {
-            self.emit_error(&track.id, &e.to_string());
-            return;
-        }
-        // Seek first (mpv queues it until the file loads), then set play/pause — avoids a blip of
-        // audio at 0 before the seek lands.
+        // The load lands on the live position directly (`start=`), so there is no blip of audio at
+        // 0 and no lost post-load seek (see `Player::load`).
         let target_ms =
             if playing { position_ms + t0.elapsed().as_millis() as i64 } else { position_ms };
         let pos = target_ms as f64 / 1000.0;
-        if pos > 0.5 {
-            let _ = self.player.seek(pos);
+        let stream_url = mpv_stream_url(&data);
+        if let Err(e) = self.player.load(
+            &stream_url,
+            &data.headers,
+            self.track_gain(data.loudness_db),
+            (pos > 0.5).then_some(pos),
+        ) {
+            self.emit_error(&track.id, &e.to_string());
+            return;
         }
         let _ = if playing { self.player.play() } else { self.player.pause() };
+        self.queue.lock().await.current_loudness_db = data.loudness_db;
         if let Some(item) = self.current_item().await {
             self.emit_now_playing(&item, "listen-together");
         }
@@ -2972,6 +3334,23 @@ impl AppState {
         p.playing = playing;
         p.queue = Some(queue);
         self.lt.broadcast_playback(p).await;
+    }
+
+    /// Put the user's crossfade setting on the player, unless we are in a Listen Together room.
+    ///
+    /// Crossfading is two decks overlapping; the sync protocol carries one track and one position,
+    /// so there is no way to tell a guest that a transition is under way. A host who fades sends
+    /// its `ChangeTrack` when the *overlap* starts (`crates/player`'s `start_crossfade`), which is
+    /// up to ten seconds before that track stops being audible here, so everyone else's song
+    /// changes while the host is still hearing the last one. Suspend it for the length of the room
+    /// and put the setting back on the way out; nothing in the database is touched.
+    ///
+    /// Every writer of the player's crossfade routes through here (startup is the exception: no
+    /// room can exist yet), or turning the setting on from Settings mid-room would put the fade
+    /// straight back. Per `Player::set_crossfade`, this takes effect from the next transition.
+    pub async fn apply_crossfade(&self) {
+        let secs = if self.lt.in_room().await { None } else { saved_crossfade(&self.db) };
+        self.player.set_crossfade(secs);
     }
 
     /// Host: seed a freshly-created room with whatever we're currently playing.
@@ -3077,18 +3456,39 @@ impl AppState {
     /// Set the repeat mode. Repeat-one is enforced by mpv's `loop-file` (seamless, no end-file
     /// event); all/off live in the queue-advance logic (`next_index`). Guests: host-only hint.
     pub async fn set_repeat(self: &std::sync::Arc<Self>, mode: RepeatMode) {
+        self.update_repeat(|_| mode).await;
+    }
+
+    /// Advance repeat mode Off -> All -> One -> Off (the global hotkey; the UI cycles itself).
+    pub async fn cycle_repeat(self: &std::sync::Arc<Self>) {
+        self.update_repeat(|mode| match mode {
+            RepeatMode::Off => RepeatMode::All,
+            RepeatMode::All => RepeatMode::One,
+            RepeatMode::One => RepeatMode::Off,
+        })
+        .await;
+    }
+
+    /// The new mode and mpv's `loop-file` are written under one queue lock: a held hotkey fires
+    /// several of these at once, and splitting the read from the write lost presses or left mpv
+    /// looping a mode the queue no longer had.
+    async fn update_repeat(
+        self: &std::sync::Arc<Self>,
+        next: impl FnOnce(RepeatMode) -> RepeatMode,
+    ) {
         if self.lt.is_guest().await {
             self.emit_guest_hint();
             return;
         }
-        {
+        let mode = {
             let mut q = self.queue.lock().await;
-            q.repeat = mode;
-        }
+            q.repeat = next(q.repeat);
+            let _ = self.player.set_loop_file(q.repeat == RepeatMode::One);
+            q.repeat
+        };
         if let Some(m) = &self.media {
             m.set_repeat(mode);
         }
-        let _ = self.player.set_loop_file(mode == RepeatMode::One);
         self.emit_queue().await; // carries the new repeat state to the UI
         self.persist_queue().await;
         // Repeat-all newly on while playing the last track: the wrap target needs priming.
@@ -3154,10 +3554,13 @@ impl AppState {
         self.insert_queued(items, next, from.clone()).await;
         if let Some(token) = continuation {
             // After `insert_queued`: an add to an empty queue starts playback, which bumps the
-            // generation the walk has to match.
+            // generation the walk primes under.
             let gen = self.generation.load(Ordering::SeqCst);
+            let epoch = self.queue.lock().await.epoch;
             let me = self.clone();
-            tokio::spawn(async move { me.fill_playlist(gen, token, Fill::Queued(from)).await });
+            tokio::spawn(
+                async move { me.fill_playlist(epoch, gen, token, Fill::Queued(from)).await },
+            );
         }
     }
 
@@ -3570,9 +3973,10 @@ fn guest_insert_index(items: &[SongItem], current: usize) -> usize {
 /// The autoplay radio seed for a queue source: playlist/album pages pass their playlist id
 /// (`VL…` browseId or bare `OLAK5uy_…`/`PL…`) → `RDAMPL<id>` playlist radio. `None` (single
 /// song / artist top-songs) → no pinned seed; autoplay seeds `RDAMVM<last video>` at extension
-/// time instead.
+/// time instead. A playlist on this machine has no YouTube radio, so it gets no seed either, while
+/// keeping its `source_id` (that is what the player's "Remove from this playlist" writes to).
 fn radio_seed_for(source_id: Option<String>) -> Option<String> {
-    source_id.map(|id| {
+    source_id.filter(|id| !is_local_playlist(id)).map(|id| {
         let id = id.strip_prefix("VL").unwrap_or(&id);
         // A mix id already *is* a radio playlist; wrapping it in another `RDAMPL` asks for a
         // playlist YouTube has never heard of. This is the seed that continues a mix past the page
@@ -3606,6 +4010,7 @@ fn splice_radio_into(
     }
     q.radio_seed = Some(seed);
     q.source_name = title;
+    q.source_id = None; // a radio is nobody's playlist to edit
     q.radio = true;
     // Shuffle is sticky across queues: re-snapshot the new order as the "original", then shuffle
     // what's upcoming (same handling as a radio hydration in `play_song`).
@@ -3624,6 +4029,18 @@ fn splice_radio_into(
 /// rose with how long you had been listening. 200 is well past what the panel's "Previously played"
 /// section shows and past any plausible scroll-back.
 const KEEP_PLAYED: usize = 200;
+
+/// The track the panel's "Back to …" offers, which is the one `restore_prev_context` would start.
+/// `None` unless the restore is actually reachable: a kept queue, and the pointer still at the head
+/// of the one that replaced it. So the line appears with the new queue and goes away by itself the
+/// moment playback moves on from it.
+fn prev_track_title(q: &QueueState) -> Option<&str> {
+    if q.current != 0 {
+        return None;
+    }
+    let prev = q.prev_context.as_ref()?;
+    Some(prev.items[prev.current].title.as_str())
+}
 
 /// Drop played rows beyond `keep` from the front, returning how many were removed so the caller can
 /// rebase every index that pointed into `items`.
@@ -3662,9 +4079,12 @@ fn merge_radio(
 
 /// What the skip toast blames. "unavailable" is right for a video YouTube would not serve, and
 /// wrong for an upload: the file is still there, the session is what failed. Issue #71.
+///
+/// `Unreachable` and `SignInRequired` no longer reach here: `ResolveError::affects_every_track`
+/// stops both call sites before they skip anything, because neither says anything about the track.
 fn skip_reason(e: &ResolveError) -> &'static str {
     match e {
-        ResolveError::UploadUnavailable(_) => "sign-in needed",
+        ResolveError::UploadUnavailable(_) | ResolveError::SignInRequired(_) => "sign-in needed",
         _ => "unavailable",
     }
 }
@@ -3884,6 +4304,16 @@ pub fn saved_volume(db: &Db) -> i64 {
     v.filter(|v| (0..=100).contains(v)).unwrap_or(100)
 }
 
+/// Crossfade length in seconds, or `None` when it's off. Experimental, so off unless asked for,
+/// and clamped to the range the settings slider offers in case the stored value predates it.
+pub fn saved_crossfade(db: &Db) -> Option<f64> {
+    if db.get_setting("crossfade").as_deref() != Some("true") {
+        return None;
+    }
+    let secs = db.get_setting("crossfade_secs").and_then(|s| s.parse::<f64>().ok());
+    Some(secs.filter(|s| s.is_finite()).unwrap_or(5.0).clamp(1.0, 10.0))
+}
+
 /// How far into a track a play counts (context/01 §registerPlayback): halfway, capped at 30s.
 /// `duration` is mpv's, which is 0.0 until it reports one, so an unknown length means the full 30s.
 fn history_threshold(duration: f64) -> f64 {
@@ -3894,27 +4324,60 @@ fn history_threshold(duration: f64) -> f64 {
     }
 }
 
-/// Per-track loudness gain (dB) from YouTube's `loudnessDb` (context/03, context/14). Attenuate
-/// only toward reference loudness: loud masters get pulled down, quieter tracks aren't boosted,
-/// so there's no clipping and no limiter to add.
+/// Per-track loudness gain (dB) from YouTube's `loudnessDb` (context/03, context/14), toward the
+/// -7 LUFS target: loud masters get pulled down, quiet ones get lifted (#237). The player adds a
+/// limiter whenever the gain is positive, so a lifted track can't clip.
 ///
 /// `loudnessDb` is measured against **-14 LUFS** (YouTube's own response proves it:
 /// `perceptualLoudnessDb == loudnessDb - 14`, i.e. the track's absolute LUFS). Applying it raw
 /// normalizes to -14 like the *video* site, but YouTube **Music** only pulls down what exceeds
-/// **-7 LUFS**, so raw made us ~6 dB quieter than YTM web on a typical modern master and left
-/// most tracks attenuated that YTM never touches at all. Normalize to the same -7 target.
+/// **-7 LUFS**, so raw made us ~6 dB quieter than YTM web on a typical modern master. Normalize to
+/// the same -7 target.
 ///
-/// `None` means "no filter", and that's most tracks now: below the target there is nothing to
-/// attenuate, so mpv gets its `af` cleared rather than a `volume=0dB` no-op in the chain.
-// ponytail: attenuate-only, clamped to -24 dB. If quiet tracks feel too soft, allow positive gain
-// plus an `alimiter` af to catch the resulting peaks.
+/// YTM itself never boosts, which left older, quieter masters ~6 dB under their neighbours. Here
+/// they are lifted by at most [`MAX_BOOST_DB`].
+///
+/// `None` means "no filter": on target (or no metadata), mpv gets its `af` cleared rather than a
+/// `volume=0dB` no-op in the chain. Callers go through [`AppState::track_gain`], which is where
+/// the user's `normalize_volume` switch turns the whole thing off.
+// ponytail: no peak data from YouTube, so the boost cap is a guess at how much limiting a dynamic
+// master tolerates. Lower MAX_BOOST_DB if classical/jazz sounds squashed.
 fn loudness_gain(loudness_db: Option<f64>) -> Option<f64> {
-    let gain = TARGET_LUFS - (loudness_db? - 14.0);
-    (gain < -0.05).then(|| gain.max(-24.0))
+    let gain = (TARGET_LUFS - (loudness_db? - 14.0)).clamp(-24.0, MAX_BOOST_DB);
+    (gain.abs() >= 0.05).then_some(gain)
+}
+
+/// The URL to hand mpv for one resolved track: the loopback chunked proxy when it is up, otherwise
+/// the googlevideo URL itself. Local files (no scheme) and non-http schemes pass straight through.
+///
+/// ffmpeg opens a stream with an open-ended `Range: bytes=X-`, which googlevideo throttles to ~2×
+/// realtime; the proxy re-issues it as bounded ranges, which are served at full speed, so both the
+/// first play and every seek start sooner. audioproxy.rs has the numbers and the kill-switch.
+fn mpv_stream_url(data: &PlaybackData) -> String {
+    // A user proxy reaches mpv as `http-proxy` (#241), and ffmpeg would send the loopback request
+    // through it, and it cannot reach our 127.0.0.1, so audio would go silent. Hand mpv the
+    // googlevideo URL instead and let the user's proxy carry it: no chunked proxy, but working
+    // playback. Nothing else is lost, because the proxy's own upstream fetch already goes through
+    // `http::client()`, which is proxied.
+    if crate::http::has_proxy() {
+        return data.stream_url.clone();
+    }
+    let http = data.stream_url.starts_with("http://") || data.stream_url.starts_with("https://");
+    if http {
+        if let Some(url) = crate::audioproxy::register(&data.stream_url, &data.headers) {
+            return url;
+        }
+    }
+    data.stream_url.clone()
 }
 
 /// Loudness target, matching YouTube Music's own player rather than the video site's -14.
 const TARGET_LUFS: f64 = -7.0;
+
+/// Most a quiet track is lifted toward [`TARGET_LUFS`]. Every dB of boost is a dB the limiter may
+/// have to take back off the peaks, so this is a dynamics budget, not a loudness one: +6 flattened
+/// dynamic masters audibly (#298, #300), while +3 still closes most of the gap #237 reported.
+const MAX_BOOST_DB: f64 = 3.0;
 
 /// Fingerprint of a queue's track list: what `emit_queue` compares to decide whether the UI
 /// already has these rows. Hashes length, `video_id`, and every field the panel renders
@@ -3951,6 +4414,7 @@ fn persist_fingerprint(q: &QueueState) -> u64 {
     q.shuffle_orig.is_some().hash(&mut hasher);
     q.radio_seed.hash(&mut hasher);
     q.source_name.hash(&mut hasher);
+    q.source_id.hash(&mut hasher);
     q.radio.hash(&mut hasher);
     hasher.finish()
 }
@@ -3960,9 +4424,10 @@ mod tests {
     use super::{
         append_page, backfill_metadata, cache_horizon, drop_duplicates, enqueue_at,
         format_duration, get_url, guest_insert_index, history_threshold, is_mix, loudness_gain,
-        merge_radio, next_index, parse_duration_ms, persist_fingerprint, put_url,
+        merge_radio, next_index, parse_duration_ms, persist_fingerprint, prev_track_title, put_url,
         queue_fingerprint, radio_seed_for, shuffle_new_queue, shuffle_upcoming, splice_radio_into,
         trim_played, unshuffled, upcoming_queued, QueueState, RepeatMode, VideoUrls, KEEP_PLAYED,
+        LOCAL_PLAYLIST_PREFIX, MAX_BOOST_DB,
     };
 
     /// The whole point of the video-URL map is answering a reopen without a round trip, so a live
@@ -4653,6 +5118,8 @@ mod tests {
         assert_eq!(radio_seed_for(Some("OLAK5uy_x".into())).as_deref(), Some("RDAMPLOLAK5uy_x"));
         // No source (single song / artist top-songs) → no pinned seed.
         assert_eq!(radio_seed_for(None), None);
+        // A playlist on this machine has no YouTube radio: autoplay seeds off the last track.
+        assert_eq!(radio_seed_for(Some(format!("{LOCAL_PLAYLIST_PREFIX}7"))), None);
     }
 
     #[test]
@@ -4680,17 +5147,87 @@ mod tests {
     }
 
     #[test]
-    fn loudness_gain_attenuates_only_above_the_target() {
+    fn loudness_gain_moves_toward_the_target() {
         // "As It Was" measures loudnessDb 7.77 ⇒ -6.23 LUFS, 0.77 dB over the -7 target.
         assert_eq!(loudness_gain(Some(7.77)).map(|g| (g * 100.0).round()), Some(-77.0));
-        // Exactly on target, and everything below -7 LUFS, gets no filter at all — YTM doesn't
-        // touch these either. (Real values: "Levitating" 6.85, "Shape of You" 6.35, "bad guy" 0.11.)
-        for l in [7.0, 6.85, 6.35, 0.11, -5.0] {
-            assert_eq!(loudness_gain(Some(l)), None, "loudnessDb {l} should not attenuate");
-        }
+        // Exactly on target gets no filter at all.
+        assert_eq!(loudness_gain(Some(7.0)), None);
+        // Quieter masters are lifted: "Shape of You" 6.35 ⇒ +0.65 dB.
+        assert_eq!(loudness_gain(Some(6.35)).map(|g| (g * 100.0).round()), Some(65.0));
+        // ...but by no more than the cap ("bad guy" 0.11 would want +6.89).
+        assert_eq!(loudness_gain(Some(0.11)), Some(MAX_BOOST_DB));
+        assert_eq!(loudness_gain(Some(-5.0)), Some(MAX_BOOST_DB));
         // Extreme loudness clamps at −24 dB.
         assert_eq!(loudness_gain(Some(40.0)), Some(-24.0));
         // No metadata → no filter.
         assert_eq!(loudness_gain(None), None);
+    }
+
+    /// Clicking a song outside the queue replaces it, and Previous then has to reach the track
+    /// that was playing, where it was left, with its own order and shuffle behind it.
+    #[test]
+    fn a_replaced_queue_comes_back_where_it_was_left() {
+        let mut q = QueueState {
+            items: vec![song("a", None), song("b", None), song("c", None)],
+            current: 1,
+            played_from: 1,
+            shuffle_orig: Some(vec![song("c", None), song("b", None), song("a", None)]),
+            source_name: Some("Deep cuts".into()),
+            source_id: Some("PL1".into()),
+            radio_seed: Some("RDAMPLPL1".into()),
+            ..QueueState::default()
+        };
+
+        q.keep_context(42.5);
+        q.items = vec![song("clicked", None)]; // what `play_song` does next
+        q.current = 0;
+        assert!(q.shuffle_orig.is_none(), "the new queue starts on its own terms");
+
+        let prev = q.prev_context.take().expect("the replaced queue is kept");
+        assert_eq!(q.restore_context(prev), ("b".into(), 42.5));
+        assert_eq!(
+            q.items.iter().map(|i| i.video_id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(q.current, 1);
+        assert_eq!(q.played_from, 1);
+        assert_eq!(q.source_id.as_deref(), Some("PL1"));
+        assert_eq!(q.radio_seed.as_deref(), Some("RDAMPLPL1"));
+        assert!(q.shuffle_orig.is_some(), "shuffle came back with it");
+        assert!(q.prev_context.is_none(), "one level deep: the restore is the end of it");
+    }
+
+    /// The panel's "Back to …" line is drawn from this, so it has to name the track Previous would
+    /// actually start, and it has to disappear once the restore is out of reach.
+    #[test]
+    fn the_back_line_lasts_as_long_as_the_restore_does() {
+        let mut q = QueueState {
+            items: vec![song("a", None), song("b", None)],
+            current: 1,
+            ..QueueState::default()
+        };
+        assert_eq!(prev_track_title(&q), None, "nothing was replaced");
+
+        q.keep_context(12.0);
+        q.items = vec![song("clicked", None)];
+        q.current = 0;
+        assert_eq!(prev_track_title(&q), Some("b"));
+
+        // The radio hydrated behind the clicked song and it played on: Previous has a track of its
+        // own to reach now, so the kept queue and the line go.
+        q.items.push(song("radio", None));
+        q.seek_to(1);
+        assert_eq!(prev_track_title(&q), None);
+        // And back at the head (repeat-all wrapped, or the first row was clicked) it stays gone.
+        q.seek_to(0);
+        assert_eq!(prev_track_title(&q), None);
+    }
+
+    /// An empty queue is not a context worth coming back to — Previous would land on nothing.
+    #[test]
+    fn nothing_is_kept_from_an_empty_queue() {
+        let mut q = QueueState::default();
+        q.keep_context(0.0);
+        assert!(q.prev_context.is_none());
     }
 }

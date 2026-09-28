@@ -33,6 +33,13 @@ pub fn set_proxy(proxy: Option<&str>) {
     }
 }
 
+/// Whether [`client`] was pointed at a user proxy. mpv gets the same setting as its `http-proxy`
+/// (#241), and ffmpeg would send a loopback URL through it, so the audio proxy has to stand down
+/// when this is set. See `state::mpv_stream_url`.
+pub fn has_proxy() -> bool {
+    PROXY.get().is_some()
+}
+
 pub fn client() -> &'static reqwest::Client {
     static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
     HTTP.get_or_init(|| {

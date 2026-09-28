@@ -36,6 +36,12 @@ impl Locale {
             format!("{regional_tag},{fallback};q=0.9")
         }
     }
+
+    /// The `Accept-Language` to send alongside this locale.
+    #[inline]
+    pub fn accept_language(&self) -> String {
+        self.accept_language_header()
+    }
 }
 
 // The three load-bearing JSON flags (context/01) are realized structurally here:

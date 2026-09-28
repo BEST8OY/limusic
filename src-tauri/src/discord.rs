@@ -171,6 +171,11 @@ impl RpcConfig {
 
 enum Msg {
     Track(Box<Track>),
+    /// The playing track's album, learned after it started. Unlike `Track`, keeps the timeline.
+    Album {
+        video_id: String,
+        album: String,
+    },
     Duration(f64),
     /// A position tick. `at` is when the value was read — the thread ages it before use.
     Position {
@@ -219,6 +224,12 @@ impl DiscordHandle {
             thumbnail: item.thumbnail.as_deref().filter(|_| !local).and_then(discord_thumb),
             local,
         })));
+    }
+
+    /// Same as `LastfmHandle::set_album`: a card played from search has no album until the radio
+    /// behind it arrives (#309), and `set_track` would reset the card's timeline.
+    pub fn set_album(&self, video_id: &str, album: &str) {
+        let _ = self.tx.send(Msg::Album { video_id: video_id.to_owned(), album: album.to_owned() });
     }
 
     /// mpv's reported track length — the only source of a real duration (`SongItem::duration` is a
@@ -399,6 +410,13 @@ impl Presence {
                 self.pos = 0.0;
                 self.pos_at = Instant::now();
                 self.duration = 0.0; // length unknown until mpv reports it (grace waits for it)
+            }
+            // Dirty, since `wants_push` compares the track id and this one hasn't changed.
+            Msg::Album { video_id, album } => {
+                if let Some(t) = self.track.as_mut().filter(|t| t.video_id == video_id) {
+                    t.album = Some(album);
+                    self.cfg_dirty = true;
+                }
             }
             Msg::Duration(secs) => self.duration = secs,
             Msg::Position { pos, at } => {
@@ -873,6 +891,22 @@ mod tests {
         });
         p.last_send = Some(Instant::now() - Duration::from_secs(60));
         p.cfg_dirty = false;
+    }
+
+    /// An album learned mid-track (#309) re-pushes the shown card, but only for that track: one
+    /// arriving for a track that has since been replaced is dropped.
+    #[test]
+    fn a_late_album_repushes_only_its_own_track() {
+        let mut p = playing("seed", 5.0);
+        p.duration = 200.0;
+        sent_now(&mut p, 5);
+        assert_eq!(p.plan(), Act::Idle);
+        p.apply(Msg::Album { video_id: "other".into(), album: "Nope".into() });
+        assert_eq!(p.track.as_ref().unwrap().album, None);
+        assert_eq!(p.plan(), Act::Idle);
+        p.apply(Msg::Album { video_id: "seed".into(), album: "After Hours".into() });
+        assert_eq!(p.track.as_ref().unwrap().album.as_deref(), Some("After Hours"));
+        assert_eq!(p.plan(), Act::Push);
     }
 
     /// The reported bug: a gapless advance pushed a card before mpv reported the new track's

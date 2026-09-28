@@ -272,7 +272,7 @@ mod imp {
                 }
             });
         if let Some(icon) = crate::appicon::current(app) {
-            builder = builder.icon(icon);
+            builder = builder.icon(sized(&icon));
         }
         builder.build(app)?;
 
@@ -288,8 +288,24 @@ mod imp {
 
     pub fn set_icon(app: &AppHandle, icon: &tauri::image::Image<'_>) {
         if let Some(tray) = app.tray_by_id("main") {
-            let _ = tray.set_icon(Some(icon.clone()));
+            let _ = tray.set_icon(Some(sized(icon)));
         }
+    }
+
+    /// Windows draws the notification area at `SM_CXSMICON` and stretches anything else without
+    /// filtering (`tray-icon` builds the HICON at whatever size it is handed), so resample first.
+    /// That is half of #225: the bundled fallback was a 32px `.ico` entry, a custom icon up to
+    /// 1024px, and neither is what the tray draws at.
+    #[cfg(target_os = "windows")]
+    fn sized(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
+        let s = crate::taskbar::tray_icon_size();
+        crate::appicon::scaled(icon, s, s)
+    }
+
+    /// macOS sets the NSImage's size itself, so there this is a copy and nothing more.
+    #[cfg(not(target_os = "windows"))]
+    fn sized(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
+        icon.clone().to_owned()
     }
 }
 

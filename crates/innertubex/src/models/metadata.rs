@@ -560,13 +560,68 @@ pub(crate) fn parse_list_item(node: &Value) -> Option<SongItem> {
     })
 }
 
-/// The play count from an album row's third flex column ("53M plays" → "53M"). Playlist rows put
-/// the album name in that column instead, so the trailing "plays" is the discriminator — the
-/// locale is pinned to en (models::context), so it's always that word. Live-verified 2026-08.
+/// A podcast episode row (`musicMultiRowListItemRenderer`), the only row a show page (`MPSP…`),
+/// Saved Episodes and the home Podcasts feed carry. Only the home rows name their show
+/// (`secondTitle`); on a show page `artists` is left for the page to fill. Issue #286.
+pub(crate) fn parse_episode_item(node: &Value) -> Option<SongItem> {
+    let video_id = find_first_str(node.get("onTap").or_else(|| node.get("overlay"))?, "videoId")?;
+    let title = runs_text(node.get("title"))?;
+    let duration = node
+        .pointer("/playbackProgress/musicPlaybackProgressRenderer/durationText")
+        .and_then(runs_text_opt)
+        .and_then(|d| episode_duration(&d));
+    Some(SongItem {
+        video_id,
+        title,
+        artists: runs_text(node.get("secondTitle")).unwrap_or_default(),
+        duration,
+        thumbnail: last_thumbnail(node.get("thumbnail")?),
+        // An episode's type is MUSIC_VIDEO_TYPE_PODCAST_EPISODE, which "hide music videos" would
+        // otherwise drop. Video mode still reads the player response, so video podcasts keep it.
+        is_video: false,
+        library: library_toggle(node),
+        ..Default::default()
+    })
+}
+
+/// " • 1 hr 4 min" → "1:04:00", " • 55 min" → "55:00": the colon form every other row uses.
+/// ponytail: numbers only, so it survives a localized unit word; a lone number is read as minutes,
+/// which makes an exact "2 hr" episode "2:00". The player's own duration corrects it on play.
+fn episode_duration(text: &str) -> Option<String> {
+    let n: Vec<u32> =
+        text.split(|c: char| !c.is_ascii_digit()).filter_map(|s| s.parse().ok()).collect();
+    match n[..] {
+        [m] => Some(format!("{m}:00")),
+        [h, m] => Some(format!("{h}:{m:02}:00")),
+        _ => None,
+    }
+}
+
+/// The play count from an album row's third flex column ("53M plays" → "53M"). Playlist and
+/// library rows put the album name in that column instead, so the two have to be told apart.
+///
+/// The discriminator used to be the trailing word "plays", which only held while the locale was
+/// pinned to en. The UI language now goes out as `hl` (#274), so it is structural instead: the
+/// album column links its album page and a play count links nothing, and a count opens with a
+/// digit in whatever numerals the locale writes ("53M plays", "9845만회 재생"). Live-verified
+/// 2026-09-20 in en and ko across an album page and five playlists; 773 search rows in en kept
+/// every play count and every album exactly as the old word match had them.
 pub(crate) fn play_count(node: &Value) -> Option<String> {
     let text = flex_column_text(node, 2)?;
-    let (count, unit) = text.trim().rsplit_once(' ')?;
-    unit.eq_ignore_ascii_case("plays").then(|| count.to_owned())
+    let text = text.trim();
+    if flex_column_links(node, 2) || !text.starts_with(char::is_numeric) {
+        return None;
+    }
+    // The unit word is noise; the number is the value. No space to cut at (Japanese writes
+    // "9845万回再生") leaves the whole string, which still reads as a count.
+    Some(text.rsplit_once(' ').map_or(text, |(count, _)| count).to_owned())
+}
+
+/// True when any run of the `i`th flex column navigates somewhere: what separates a linked album
+/// from the play count that shares that column. See [`play_count`].
+fn flex_column_links(node: &Value, i: usize) -> bool {
+    flex_runs(node, i)
+        .is_some_and(|runs| runs.iter().any(|r| r.get("navigationEndpoint").is_some()))
 }
 
 /// The album name from that same third flex column — the other thing it can hold. A playlist row's
@@ -581,7 +636,7 @@ fn album_column(node: &Value) -> Option<String> {
 
 /// The album's browseId (`MPRE…`): either the linked album run or the row menu's "Go to album"
 /// entry — whichever the renderer carries. Tolerant: first `MPRE…` browseId in the node. context/08.
-fn album_id(node: &Value) -> Option<String> {
+pub(crate) fn album_id(node: &Value) -> Option<String> {
     find_all(node, "browseId")
         .into_iter()
         .filter_map(Value::as_str)
@@ -626,6 +681,17 @@ pub(crate) fn first_artist_id(runs: &[Value]) -> Option<String> {
     runs.iter().find_map(|r| {
         let id = r.get("navigationEndpoint")?.get("browseEndpoint")?.get("browseId")?.as_str()?;
         id.starts_with("UC").then(|| id.to_owned())
+    })
+}
+
+/// The album's name from a byline: the run that links an `MPRE…` album ("Delara • Sjelen • 2026").
+/// Structural, so a music video's "Artist • 50M views" yields nothing rather than a view count,
+/// and it reads the same in every locale. context/08.
+pub(crate) fn album_from_runs(runs: &[Value]) -> Option<String> {
+    runs.iter().find_map(|r| {
+        let id = r.get("navigationEndpoint")?.get("browseEndpoint")?.get("browseId")?.as_str()?;
+        let text = r.get("text")?.as_str()?.trim();
+        (id.starts_with("MPRE") && !text.is_empty()).then(|| text.to_owned())
     })
 }
 
@@ -738,7 +804,7 @@ pub fn parse_panel_video(node: &Value) -> Option<SongItem> {
         artists,
         artist_id,
         artist_runs: byline_runs.map(|r| artist_runs(r)).unwrap_or_default(),
-        album: None,
+        album: byline_runs.and_then(|r| album_from_runs(r)),
         album_id: album_id(node),
         duration,
         play_count: None,
@@ -860,6 +926,9 @@ fn subtitle_groups(runs: &[Value]) -> Vec<Group> {
 
 /// Result rows on an unfiltered search lead with the result type: "Song • Delara • 3:02". Nothing
 /// downstream wants that word, and taken as an artist it lands in the user's Last.fm scrobbles.
+///
+/// English only, and deliberately: YouTube localizes these words now that `hl` follows the UI
+/// language (#274). [`split_subtitle`] carries two structural tests for the rest.
 fn is_type_label(s: &str) -> bool {
     matches!(
         s,
@@ -890,9 +959,19 @@ fn split_subtitle(runs: Option<&Vec<Value>>) -> (String, Option<String>, Option<
     // Drop a leading type label so artist/album don't both shift one field to the right. A later
     // field linking an artist channel proves the first one isn't the artist; the word list covers
     // the rows where nothing is linked at all.
+    //
+    // Third test, for the rows where neither of those fires: `hl` follows the UI language now
+    // (#274), so the word list is blind to "노래 • 2:43". Two fields whose second is the length
+    // means there is no artist field at all (YouTube drops it when the query *is* the artist,
+    // #216), so the first one is the label. Checked against 773 live search rows in en: the only
+    // value this shape ever carried was "Song". A misread unlinked artist comes back from
+    // `/player` (`backfill_metadata`) on play, where a stray "노래" would have stuck for good, in
+    // the row and in the user's scrobbles.
     if groups.len() > 1
         && !groups[0].artist_link
-        && (is_type_label(&groups[0].text) || groups[1..].iter().any(|g| g.artist_link))
+        && (is_type_label(&groups[0].text)
+            || groups[1..].iter().any(|g| g.artist_link)
+            || (groups.len() == 2 && is_duration(&groups[1].text)))
     {
         groups.remove(0);
     }
@@ -1287,6 +1366,58 @@ mod tests {
         assert_eq!(plays(json!("")).unwrap().album, None);
     }
 
+    // #274: `hl` follows the UI language, so the word "plays" is gone in ten of the eleven
+    // locales. The column that opens with a digit and links nothing is the count; the one that
+    // links its album page is the album, whatever either of them says.
+    #[test]
+    fn a_localized_play_count_is_still_a_play_count() {
+        let row = |third: Value, link: bool| {
+            let mut run = json!({ "text": third });
+            if link {
+                run["navigationEndpoint"] =
+                    json!({ "browseEndpoint": { "browseId": "MPREalbum1" } });
+            }
+            json!({
+                "playlistItemData": { "videoId": "abc123" },
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Song Title" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "The Artist" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [run] } } }
+                ]
+            })
+        };
+        let ko = parse_list_item(&row(json!("9845만회 재생"), false)).unwrap();
+        assert_eq!(ko.play_count.as_deref(), Some("9845만회"));
+        assert_eq!(ko.album, None);
+        // No space to cut at: the whole string is the count rather than nothing at all.
+        let ja = parse_list_item(&row(json!("9845万回再生"), false)).unwrap();
+        assert_eq!(ja.play_count.as_deref(), Some("9845万回再生"));
+        // A linked column is the album even when the album is named after a year.
+        let album = parse_list_item(&row(json!("1989"), true)).unwrap();
+        assert_eq!(album.play_count, None);
+        assert_eq!(album.album.as_deref(), Some("1989"));
+    }
+
+    // #274 again, the other half: with `hl=ko` a row YouTube stripped the artist from reads
+    // "노래 • 2:43", and the word list cannot see that "노래" is the type label. Two fields whose
+    // second is the length have no artist field, so the first one goes.
+    #[test]
+    fn a_localized_type_label_is_not_an_artist() {
+        let row = json!({
+            "playlistItemData": { "videoId": "abc123" },
+            "flexColumns": [
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Himmelen brenner" }] } } },
+                { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                    { "text": "노래" }, { "text": " \u{2022} " }, { "text": "2:43" }
+                ] } } }
+            ]
+        });
+        let s = parse_list_item(&row).unwrap();
+        assert_eq!(s.artists, "");
+        assert_eq!(s.duration.as_deref(), Some("2:43"));
+        assert_eq!(s.album, None);
+    }
+
     // #216: search for an artist by name and YouTube drops the artist from the song rows it
     // returns, leaving "Song • 3:55". The length is not a name; taking it as one put a time in the
     // artist field of the row, the card, the player bar and the scrobble.
@@ -1428,6 +1559,34 @@ mod tests {
             ] } }
         });
         assert_eq!(parse_next(&root).items[0].artists, "Delara");
+    }
+
+    /// Radio and autoplay rows scrobbled album-less because the panel parser never read the
+    /// byline's album run (issue #309). A music video's byline links no album and must stay empty.
+    #[test]
+    fn panel_album_is_the_linked_byline_run() {
+        let row = |id: &str, byline: Value| {
+            json!({ "playlistPanelVideoRenderer": {
+                "videoId": id,
+                "title": { "runs": [{ "text": "T" }] },
+                "longBylineText": { "runs": byline }
+            }})
+        };
+        let artist = json!({ "text": "Delara", "navigationEndpoint": { "browseEndpoint": { "browseId": "UCdelara" } } });
+        let song = row(
+            "song",
+            json!([
+                artist, { "text": " • " },
+                { "text": "Sjelen", "navigationEndpoint": { "browseEndpoint": { "browseId": "MPREb_sjelen" } } },
+                { "text": " • " }, { "text": "2026" }
+            ]),
+        );
+        let video = row("video", json!([artist, { "text": " • " }, { "text": "50M views" }]));
+        let root =
+            json!({ "contents": { "playlistPanelRenderer": { "contents": [song, video] } } });
+        let items = parse_next(&root).items;
+        assert_eq!(items[0].album.as_deref(), Some("Sjelen"));
+        assert_eq!(items[1].album, None);
     }
 
     #[test]

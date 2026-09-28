@@ -62,11 +62,13 @@
 		title={item.subtitle ? `${item.title} — ${item.subtitle}` : item.title}
 	>
 		<div class="relative aspect-square w-full">
+			<!-- The sheets don't lift on hover any more, for the same reason MediaCard's cover doesn't
+			     zoom (#341): a transform transition per card the pointer crosses. -->
 			<div
-				class="absolute inset-0 origin-bottom -translate-y-[7px] scale-x-[0.84] rounded-xl bg-muted-foreground/15 transition-transform duration-300 ease-out group-hover:-translate-y-[13px]"
+				class="absolute inset-0 origin-bottom -translate-y-[7px] scale-x-[0.84] rounded-xl bg-muted-foreground/15"
 			></div>
 			<div
-				class="absolute inset-0 origin-bottom -translate-y-[3px] scale-x-[0.92] rounded-xl bg-muted-foreground/25 transition-transform duration-300 ease-out group-hover:-translate-y-[7px]"
+				class="absolute inset-0 origin-bottom -translate-y-[3px] scale-x-[0.92] rounded-xl bg-muted-foreground/25"
 			></div>
 			<!-- No resting shadow: see MediaCard. The sheet edges above are what gives the card
 			     its depth, and they cost a transform instead of a gaussian blur per card. -->
@@ -75,7 +77,7 @@
 					<img
 						{src}
 						alt=""
-						class="h-full w-full object-cover transition-transform duration-500 ease-out group-hover:scale-105"
+						class="h-full w-full object-cover"
 						loading="lazy"
 						draggable="false"
 						onerror={imgFailed}
@@ -96,7 +98,7 @@
 					</div>
 				{/if}
 				<button
-					class="absolute bottom-2 right-2 flex h-9 w-9 translate-y-1 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground opacity-0 shadow-lg transition-[opacity,transform] duration-200 ease-out focus-visible:opacity-100 group-hover:translate-y-0 group-hover:opacity-100"
+					class="absolute bottom-2 right-2 flex h-9 w-9 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground opacity-0 shadow-lg transition-opacity duration-200 ease-out focus-visible:opacity-100 group-hover:opacity-100"
 					class:animate-pulse={busy}
 					disabled={busy}
 					aria-label={t('a11y.play_item', { title: item.title })}

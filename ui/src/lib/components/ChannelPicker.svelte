@@ -8,6 +8,7 @@
 	import { toast, ui } from '$lib/player.svelte';
 	import { thumb } from '$lib/thumb';
 	import { t } from '$lib/i18n.svelte';
+	import { friendlyNetError } from '$lib/neterr';
 
 	let loading = $state(false);
 	let switching = $state<string | null>(null);
@@ -99,7 +100,9 @@
 				<p class="px-3 py-8 text-center text-sm text-muted-foreground">{t('common.loading')}</p>
 			{:else if error}
 				<div class="space-y-3 px-3 py-6 text-center">
-					<p class="text-sm text-destructive">{error}</p>
+					<p class="break-words text-sm text-muted-foreground">
+						{friendlyNetError(error, t('errors.unreachable'))}
+					</p>
 					<Button variant="outline" size="sm" onclick={loadIdentities}>{t('common.retry')}</Button>
 				</div>
 			{:else if ui.channelIdentities.length === 0}

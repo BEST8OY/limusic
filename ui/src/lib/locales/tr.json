@@ -60,7 +60,11 @@
 		"filter_library": "Kitaplığı filtrele…",
 		"command_description": "Şarkı, albüm, sanatçı ve çalma listesi ara",
 		"shuffle_all": "Hepsini karıştır",
-		"play_all": "Hepsini oynat"
+		"play_all": "Hepsini oynat",
+		"top_result": "En iyi sonuç",
+		"all_results_for": "\"{query}\" sorgusu için bütün sonuçlar",
+		"refresh": "Yenile",
+		"videos": "Videolar"
 	},
 	"nav": {
 		"home": "Ana Sayfa",
@@ -82,7 +86,8 @@
 		"remove_account": "Hesap sil",
 		"remove_account_title": "Limusic'ten sil?",
 		"remove_account_desc": "{name} yalnızca bu listeden kaldırıldı. Google hesabınız bu eylemden etkilenmedi ve istediğiniz zaman onunla giriş yapabilirsiniz.",
-		"saved_accounts_hint": "Geçmek için kaydedilmiş bir hesabı seçin."
+		"saved_accounts_hint": "Geçmek için kaydedilmiş bir hesabı seçin.",
+		"no_channels": "YouTube seçilebilir bir kanal döndürmedi."
 	},
 	"player": {
 		"play": "Oynat",
@@ -136,7 +141,8 @@
 		"add_to_playlist": "Çalma listesine ekle",
 		"pin_to_top": "En üste sabitle",
 		"unpin": "Sabitlemeyi kaldır",
-		"block_artist": "Sanatçıyı engelle"
+		"block_artist": "Sanatçıyı engelle",
+		"remove_from_this_playlist": "Bu çalma listesinden kaldır"
 	},
 	"home": {
 		"good_morning": "Günaydın",
@@ -154,7 +160,8 @@
 		"show_section": "{title} bölümünü göster",
 		"hide_section": "{title} bölümünü gizle",
 		"feed_empty": "Ana sayfanız bu sefer boş döndü.",
-		"signed_out_hint": "Giriş yapın ve ana sayfanız dinlediklerinizle oluşturulan miksler ve çalma listeleriyle dolsun."
+		"signed_out_hint": "Giriş yapın ve ana sayfanız dinlediklerinizle oluşturulan miksler ve çalma listeleriyle dolsun.",
+		"add_to_end": "En sona ekle"
 	},
 	"artist": {
 		"subscribe": "Abone ol",
@@ -196,7 +203,18 @@
 		"every_upload": "YouTube Music’a yüklediğin bütün parçalar",
 		"no_uploads": "Henüz bir şey yüklemedin. music.youtube.com üzerinden yüklediğin şarkılar burada görünür.",
 		"uploads_signed_out": "YouTube Music’a yüklediğin müzikleri görmek için giriş yap.",
-		"no_upload_albums": "Henüz yüklenmiş bir albüm yok. music.youtube.com üzerinde yüklediğiniz albümler burada belirecek."
+		"no_upload_albums": "Henüz yüklenmiş bir albüm yok. music.youtube.com üzerinde yüklediğiniz albümler burada belirecek.",
+		"songs_signed_out": "YouTube Music kitaplığınızda kayıtlı şarkıları görmek için oturum açın. Bu cihazdaki müzikler Yerel sekmesinde.",
+		"no_library_songs": "Kitaplığınızda henüz şarkı yok. Bir şarkının ⋯ simgesine dokunun, kaydedin ya da beğenin; buraya gelsin.",
+		"empty_signed_out": "Henüz kaydedilmiş bir şey yok. Bir çalma listesi veya albüm açıp \"Kitaplığa kaydet\"e dokunun, ya da hesabınızdakini görmek için oturum açın.",
+		"empty": "Kütüphaneniz boş.",
+		"no_saved_playlists": "Henüz çalma listesi yok. Bir listeyi açıp burada tutmak için \"Kitaplığa kaydet\"e dokunun.",
+		"no_saved_albums": "Henüz kaydedilmiş albüm yok. Bir albüm açıp \"Kitaplığa kaydet\"e dokunun.",
+		"no_saved_artists": "Henüz sanatçı yok. Burada tutmak için bir sanatçıyı kendi sayfasından kaydedin.",
+		"no_artists": "Henüz sanatçı yok. Şarkılarını veya albümlerini kaydettiğinizde burada görünürler.",
+		"on_repeat": "Sürekli Çalınanlar",
+		"on_repeat_subtitle": "Bu ay en çok dinlediğiniz {count} şarkı",
+		"songs_count": "{count} şarkı"
 	},
 	"local": {
 		"scanning": "Klasör taranıyor...",
@@ -206,7 +224,11 @@
 		"artists_count": "Sanatçılar ({count})",
 		"songs_count": "Şarkılar ({count})",
 		"add_folder": "Klasör ekle",
-		"pick_folder_dialog": "Müzik klasörünü seç"
+		"pick_folder_dialog": "Müzik klasörünü seç",
+		"folders": "Klasörler",
+		"folders_hint": "Bu klasörlerdeki müzikler internet bağlantısı olmadan da çalınabilir.",
+		"no_folders": "Henüz klasör yok. Müziklerinizin bulunduğu klasörü ekleyin, burada görünsün.",
+		"nothing_playable": "Bu klasörlerde henüz çalınabilir bir dosya bulunamadı. Aranan dosya türleri: mp3, flac, m4a, aac, ogg, opus, wav, wma, aiff, ape, wv ve mka."
 	},
 	"settings": {
 		"title": "Ayarlar",
@@ -220,7 +242,11 @@
 			"data": "Veri ve depolama",
 			"data_hint": "Ağ ve önbellek dosyaları.",
 			"about": "Hakkında",
-			"about_hint": "Sürüm, güncellemeler ve değişiklikler."
+			"about_hint": "Sürüm, güncellemeler ve değişiklikler.",
+			"discord": "Discord",
+			"discord_hint": "Rich Presence kartınızın nasıl görüneceği.",
+			"hotkeys": "Genel Klavye Kısayolları",
+			"hotkeys_hint": "Oynatmayı kontrol etmek için sistem geneli kısayollar."
 		},
 		"sections": {
 			"language": "Dil (Language)",
@@ -239,7 +265,12 @@
 			"report": "Sorun bildir",
 			"whats_new": "Yenilikler",
 			"blocked": "Engelli sanatçılar",
-			"support": "Destek"
+			"support": "Destek",
+			"scrobbling": "Scrobbling",
+			"discord_status": "Durum",
+			"discord_card": "Kart",
+			"discord_links": "Tıklanabilirlik",
+			"discord_buttons": "Düğmeler"
 		},
 		"general": {
 			"language": "Arayüz dili",
@@ -249,7 +280,7 @@
 			"autostart_hint": "Sistem açıldığında Limusic uygulamasını otomatik başlatın.",
 			"close_to_tray": "Sistem tepsisine küçült",
 			"close_to_tray_hint": "Pencere kapatıldığında arka planda çalışmaya devam etsin.",
-			"discord_rpc": "Discord Zengin Varlık",
+			"discord_rpc": "Discord Rich Presence",
 			"discord_rpc_hint": "Çalan şarkıyı Discord profilinizde gösterin.",
 			"update_banner": "Güncelleme bildirimleri",
 			"update_banner_hint": "Yeni bir Limusic sürümü çıktığında bildirim çubuğu gösterilsin.",
@@ -262,15 +293,12 @@
 			"system_titlebar_hint": "Masaüstünüz pencere çerçevesini ve butonları çizsin. Limusic kendi araç çubuğunu onun altında saklar."
 		},
 		"themes": {
-			"accent_themes": "Vurgu Temaları",
 			"interface_font": "Arayüz yazı tipi",
 			"load_font_file": "Dosyadan yazı tipi yükle",
 			"custom_colors": "Özel Renkler",
 			"primary_color": "Ana Vurgu Rengi",
 			"background_color": "Arka Plan",
 			"reset_theme": "Varsayılan temaya sıfırla",
-			"accent_colors": "Aksan renkleri",
-			"palettes": "Paletler",
 			"your_fonts": "Yazı tipleriniz",
 			"custom_font": "Özel…",
 			"font_placeholder": "Bu bilgisayarda yüklü olan yazı tipi, örn. Inter",
@@ -299,10 +327,12 @@
 			"font_filter": "Yazı Tipleri",
 			"experimental": "Deneysel",
 			"app_icon": "Uygulama simgesi",
-			"app_icon_hint": "Bir PNG görev çubuğu, sistem tepsisi ve bu penceredeki simgenin yerini alır. Kısayollar ve dosya yöneticisi yüklü olanı kullanır.",
+			"app_icon_hint": "Bir PNG, sistem tepsisindeki, bu penceredeki ve Alt-Tab'daki simgenin yerini alır. Kısayollar, dosya yöneticisi ve Windows görev çubuğu düğmesi ise yüklü simgeyi korur.",
 			"app_icon_pick": "Seçin…",
 			"app_icon_dialog": "Bir uygulama simgesi seçin",
-			"app_icon_filter": "PNG görsel"
+			"app_icon_filter": "PNG görsel",
+			"zoom": "Arayüz ölçeği",
+			"zoom_hint": "Penceredeki her şeyi ölçeklendirir. Yakınlaştırma kısayolları da bunu değiştirir ve uygulama yeniden başlatıldığında hatırlanır."
 		},
 		"playback": {
 			"audio_quality": "Ses kalitesi",
@@ -329,7 +359,18 @@
 			"blocked_artists_remove": "{name} isimli sanatçının engelini kaldır",
 			"blocked_artists_show_all": "Engelli {count} sanatçıyı göster",
 			"blocked_artists_show_less": "Daha az göster",
-			"blocked_artists_copy": "JSON dosyasını kopyala"
+			"blocked_artists_copy": "JSON dosyasını kopyala",
+			"lastfm_primary_artist": "Yalnızca birincil sanatçıyı scrobble et",
+			"lastfm_primary_artist_hint": "Last.fm'e yalnızca ilk kredilendirilen sanatçıyı gönderir, böylece dinlemeleriniz gerçek sanatçı sayfasına işlenir. \"&\" ile birleştirilmiş isimler bütün olarak korunur.",
+			"lastfm_primary_strict": "\"&\" ile birleştirilmiş sanatçıları da kaldır",
+			"lastfm_primary_strict_hint": "\"Future & Metro Boomin\" \"Future\" olarak scrobble edilir. Adında \"&\" geçen ikili gruplar da kısaltılır.",
+			"crossfade": "Çapraz geçiş",
+			"crossfade_hint": "Her parçanın sonunu bir sonrakinin başlangıcına kademeli olarak geçirir. Parçalar çakıştığı sürede ikinci bir ses kod çözücü çalıştırır, bu yüzden biraz daha fazla bellek kullanır.",
+			"crossfade_duration": "Çapraz geçiş süresi",
+			"crossfade_duration_hint": "Örtüşmenin ne kadar süreceği. Kısa parçalarda geçiş süresi kısalır, böylece bir geçiş bir öncekisi bitmeden asla başlamaz.",
+			"crossfade_seconds": "{secs}sn",
+			"normalize_volume": "Ses düzeyini normalleştirme",
+			"normalize_volume_hint": "Parçaların ne kadar yüksek sesle çaldığını eşitler, böylece alçak seviyede mastering yapılmış bir parça, kendisinden sonra gelenin altında kalmaz. Her parçayı tam olarak mastering edildiği haliyle duymak için bunu kapat."
 		},
 		"data": {
 			"clear_cache": "Görsel ve akış önbelleğini temizle",
@@ -361,6 +402,99 @@
 			"kofi": "Bana bir kahve ısmarla",
 			"kofi_hint": "Limusic ücretsiz ve ücretsiz kalacak. Bağışta bulunmak isteyenler Ko-fi'den yapabilirler.",
 			"kofi_button": "Ko-fi'yi aç"
+		},
+		"discord": {
+			"enable": "Rich Presence",
+			"enable_hint": "Şu anda çalan şarkıyı Discord profilinizde gösterir.",
+			"off_notice": "Rich Presence kapalı, bu yüzden bu profilinizde görünmüyor. Önizleme yine de yaptığınız değişiklikleri yansıtmaya devam eder.",
+			"show_paused": "Duraklatıldığında göster",
+			"show_paused_hint": "Parça duraklatıldığında kartı ekranda tutar. Discord'da duraklatma durumu olmadığından, ilerleme çubuğu çalışır durumda bırakılmak yerine kaldırılır.",
+			"hide_details": "Ayrıntıları gizle",
+			"hide_details_hint": "Yalnızca müzik çaldığını belirtir. Başlık, sanatçı, albüm, kapak resmi, ilerleme çubuğu ya da düğmeler cihazınızdan dışarı çıkmaz.",
+			"status_line": "Durum metni",
+			"status_line_hint": "Discord'un üye listesinde adınızın yanında gösterdiği şey. Aşağıdaki profil kartı her zaman uygulama adını gösterir.",
+			"status_app": "Uygulama adı",
+			"status_line1": "1. satır",
+			"status_line2": "2. satır",
+			"app_name": "Uygulama adı",
+			"app_name_hint": "Uygulama adının göründüğü her yerde \"Limusic\" yerine bunu kullanır. Değiştirmemek için boş bırakın.",
+			"app_name_placeholder": "Limusic",
+			"line1": "1. satır",
+			"line1_hint": "Kalın yazılı satır, başlığın hemen altında.",
+			"line2": "2. satır",
+			"line2_hint": "Onun altındaki daha küçük satır.",
+			"content_title": "Şarkı başlığı",
+			"content_artist": "Sanatçı",
+			"content_album": "Albüm",
+			"content_artist_album": "Sanatçı ve albüm",
+			"content_off": "Gizli",
+			"cover": "Albüm kapağı",
+			"cover_hint": "Parçanın yanında albüm kapağını gösterir.",
+			"badge": "Sağlayıcı rozeti",
+			"badge_hint": "Kapak resmini, Spotify ve Apple Music kartlarında olduğu gibi küçük bir Limusic simgesiyle işaretler.",
+			"line3": "3. satır",
+			"line3_hint": "Son satır. Discord bunu kapak resminin üzerine gelindiğinde gösterilen ipucu metni olarak da kullanır, bu yüzden albüm kapağının açık olması gerekir.",
+			"timestamps": "İlerleme çubuğu",
+			"timestamps_hint": "Parçanın altında geçen ve kalan zamanı göster.",
+			"links_hint": "Kartın bir bölümünü bağlantıya dönüştürür. Discord bunu YouTube Music'te açar ve hedef, o bölümde gösterilen içeriğe göre belirlenir: albümü gösteren bir satır albümü açar.",
+			"link_line1": "1. satır tıklanabilir",
+			"link_line2": "2. satır tıklanabilir",
+			"link_cover": "Albüm kapağı yıklanabilir",
+			"button1": "İlk düğme",
+			"button2": "İkinci düğme",
+			"buttons_hint": "Discord en fazla iki tane gösterir ve bunlar kendi profilinizde asla görünmez: yalnızca başkaları görebilir. Bu parça için hedefine ait bir bağlantısı olmayan düğme atlanır.",
+			"button_listen": "YouTube Music'te dinleyin",
+			"button_album": "Albümü görüntüle",
+			"button_artist": "Sanatçıyı görüntüle",
+			"button_app": "Limusic'i edin",
+			"button_off": "Hiçbiri",
+			"preview": "Önizle",
+			"preview_live": "Şimdi çalıyor",
+			"preview_sample": "Örnek parça",
+			"preview_paused": "Duraklatıldı, bu yüzden şu anda profilinizde görünmüyor. Ekranda tutmak için \"Duraklatıldığında göster\" seçeneğini açın.",
+			"reset": "Varsayılanlara dön",
+			"preview_status": "Üye listesi",
+			"preview_you": "Siz",
+			"preview_card": "Profil kartı"
+		},
+		"hotkeys": {
+			"title": "Genel Klavye Kısayolları",
+			"description": "Limusic simge durumuna küçültülmüş veya arka planda çalışıyor olsa bile, özelleştirilebilir klavye kısayollarıyla oynatmayı kontrol et.",
+			"enable": "Sistem geneli kısayolları etkinleştir",
+			"enable_hint": "Genel klavye kısayolları devre dışı. Kısayolları sistem genelinde dinlemek için bunları aç.",
+			"off": "Kapalı",
+			"rebind": "Yeniden ata",
+			"recording": "Bir değiştirici tuşu basılı tut ve bir tuşa bas...",
+			"wayland_hint": "GNOME (Wayland) üzerinde çalışmayabilir.",
+			"clear": "Kısayolu temizle",
+			"reset": "Varsayılanlara geri dön",
+			"conflict": "Bu kısayol zaten \"{action}\" eylemine atanmış",
+			"failed_register": "Kısayol sisteme kaydedilemedi (başka bir uygulama tarafından kullanılıyor olabilir)",
+			"section_playback": "Oynatma",
+			"section_audio": "Ses",
+			"section_window": "Pencere",
+			"action_play_pause": "Oynat / Duraklat",
+			"action_play_pause_hint": "Çalma ve duraklatma arasında geçiş yapar.",
+			"action_next_track": "Sıradaki parça",
+			"action_next_track_hint": "Kuyruktaki bir sonraki şarkıya geçer.",
+			"action_prev_track": "Önceki parça",
+			"action_prev_track_hint": "Kuyruktaki bir önceki şarkıya geri döner.",
+			"action_volume_up": "Sesi yükselt",
+			"action_volume_up_hint": "Oynatma ses düzeyini %5 yükseltir.",
+			"action_volume_down": "Sesi kıs",
+			"action_volume_down_hint": "Oynatma ses düzetini %5 düşürür.",
+			"action_mute_toggle": "Sessize al / sesi aç",
+			"action_mute_toggle_hint": "Sessize alma ve önceki ses düzeyi arasında geçiş yapar.",
+			"action_seek_forward": "İleri sar",
+			"action_seek_forward_hint": "Şarkıda 10 saniye ileri atlar.",
+			"action_seek_backward": "Geri sar",
+			"action_seek_backward_hint": "Şarkıda 10 saniye geri atlar.",
+			"action_toggle_shuffle": "Karıştırmayı aç/kapat",
+			"action_toggle_shuffle_hint": "Kuyruk için karıştırmayı açar veya kapatır.",
+			"action_toggle_repeat": "Tekrarı aç/kapat",
+			"action_toggle_repeat_hint": "Tekrar modunu değiştirir: kapalı, tümü, tek.",
+			"action_show_app": "Uygulamayı göster",
+			"action_show_app_hint": "Limusic penceresini ön plana getirir."
 		}
 	},
 	"dialogs": {
@@ -406,7 +540,8 @@
 			"zoom_in": "Yakınlaştır",
 			"zoom_out": "Uzaklaştır",
 			"reset_zoom": "Yakınlaştırmayı sıfırla",
-			"show_this_list": "Bu listeyi göster"
+			"show_this_list": "Bu listeyi göster",
+			"refresh_page": "Sayfayı yenile"
 		},
 		"tempo_pitch": {
 			"title": "Tempo ve Perde Kontrolleri",
@@ -485,7 +620,7 @@
 		"previous": "Önceki",
 		"next": "Sonraki",
 		"seek": "İlerle",
-		"volume": "Ses",
+		"volume": "Ses düzeyi",
 		"track_options": "Parça seçenekleri",
 		"playlist_options": "Çalma listesi seçenekleri",
 		"clear_search": "Aramayı temizle",
@@ -515,7 +650,8 @@
 		"expand_sidebar": "Yan paneli genişlet",
 		"collapse_sidebar": "Yan paneli daralt",
 		"show_artwork": "Kapak göster",
-		"show_video": "Video göster"
+		"show_video": "Video göster",
+		"zoom": "Arayüz ölçeği"
 	},
 	"lyrics": {
 		"title": "Şarkı sözleri",
@@ -585,7 +721,21 @@
 		"app_icon_set": "Uygulama simgesi değişti",
 		"blocked_copied": "{count} sayıda engellenmiş sanatçı JSON olarak kopyalandı",
 		"blocked_artist": "{name} engellendi",
-		"unblocked_artist": "{name} isimli sanatçının engeli kaldırıldı"
+		"unblocked_artist": "{name} isimli sanatçının engeli kaldırıldı",
+		"added_to_shortcuts": "Kısa yollara eklendi",
+		"already_in_shortcuts": "Zaten kısayollarınızda",
+		"playing_next_one": "Sıradaki çalınıyor",
+		"playing_next": "{count} şarkı sırada çalınacak",
+		"added_to_queue_one": "Kuyruğa eklendi",
+		"added_to_queue": "{count} şarkı kuyruğa eklendi",
+		"liked": "Beğenilen şarkılara eklendi",
+		"disliked": "Beğenilmedi",
+		"rating_removed": "Değerlendirme kaldırıldı",
+		"subscribed": "{name} isimli sanatçıya abone olundu",
+		"unsubscribed": "Abonelikten çıkıldı",
+		"signed_in_as": "{name} olarak giriş yapıldı",
+		"switched_to": "{name} hesabına geçildi",
+		"could_not_add": "Bu eklenemedi, bunun yerine açmayı deneyin"
 	},
 	"history": {
 		"title": "Geçmiş",
@@ -595,5 +745,33 @@
 		"songs_count": "{count} şarkı",
 		"empty": "Burada henüz bir şey yok. Giriş yaptıktan sonra dinledikleriniz bu sayfada belirecek.",
 		"signed_out": "YouTube Music dinleme geçmişinizi görmek için giriş yapın."
+	},
+	"selection": {
+		"actions": "Seçili parça için eylemler",
+		"count": "{count} seçildi",
+		"selected": "Seçili",
+		"not_selected": "Seçili değil",
+		"hidden": "{count} gizli",
+		"enter": "Parçaları seç",
+		"exit": "Seçim kipinden çık",
+		"hint": "İşlem yapmak için parça seçin",
+		"select_all": "Hepsini seç ({count})",
+		"clear": "Temizle",
+		"track": "{title}. Seçmek için Space, oynatmak için Enter.",
+		"track_guest": "{title}. Seçmek için Space, oturum kuyruğuna eklemek için Enter.",
+		"select_track": "{title} parçasını seç",
+		"lost": "{count} seçili parça artık bu listede değil.",
+		"pending": "{count} seçili parça, hâlâ yüklenmekte olan sayfalarda aranıyor.",
+		"local_playlist": "Yerel dosyalar YouTube çalma listesine eklenemez.",
+		"account_changed": "Hesap değiştiği için şarkı ekleme işlemi durduruldu.",
+		"playlist_partial": "{playlist} listesine {added} eklendi; {duplicates} zaten listede vardı; {remaining} onaylanmadı. {error}",
+		"remove": "Bu çalma listesinden kaldır",
+		"remove_confirm": "{count} kaldır?"
+	},
+	"errors": {
+		"unreachable": "YouTube Music'e erişilemedi. Bağlantınızı kontrol edin.",
+		"offline_title": "Bağlantı yok",
+		"offline_body": "Limusic, YouTube Music'e erişemiyor. İnternet bağlantınızı kontrol ederek tekrar deneyin.",
+		"generic_title": "Bir şeyler yanlış gitti"
 	}
 }

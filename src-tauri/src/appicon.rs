@@ -35,7 +35,68 @@ pub fn current(app: &AppHandle) -> Option<Image<'static>> {
             None
         }
     });
-    custom.or_else(|| app.default_window_icon().map(|i| i.clone().to_owned()))
+    custom.or_else(|| bundled(app))
+}
+
+/// The bundled icon, at a resolution worth scaling down from.
+///
+/// `default_window_icon` is fine everywhere but Windows, where tauri's codegen builds it from the
+/// *first* entry of `icons/icon.ico` rather than the biggest, and that entry is 32x32. Every
+/// Windows install was therefore feeding a 32px source to a notification area that draws at 16 to
+/// 32px depending on DPI, which is the ragged tray icon in #225. The 256px PNG is the same artwork.
+fn bundled(app: &AppHandle) -> Option<Image<'static>> {
+    #[cfg(target_os = "windows")]
+    {
+        match Image::from_bytes(include_bytes!("../icons/128x128@2x.png")) {
+            Ok(img) => return Some(img),
+            Err(e) => tracing::warn!(error = %e, "bundled 256px icon unreadable"),
+        }
+    }
+    app.default_window_icon().map(|i| i.clone().to_owned())
+}
+
+/// Resample to `w` x `h` by averaging each destination pixel's source rectangle.
+///
+/// Windows never does this for us: `tray-icon` and tao both build the HICON at whatever size they
+/// are handed and leave the shell to stretch it, so a 1024x1024 custom icon reached a 16px tray
+/// slot as an unfiltered point sample. Every caller here scales down from a larger source, which
+/// is exactly what a box filter is for.
+///
+/// It lives here rather than beside its Windows callers so it can be tested on Linux, which is
+/// also the only reason it is compiled there.
+#[cfg(any(target_os = "windows", test))]
+pub fn scaled(img: &Image<'_>, w: u32, h: u32) -> Image<'static> {
+    let (sw, sh) = (img.width(), img.height());
+    if (sw, sh) == (w, h) || sw == 0 || sh == 0 || w == 0 || h == 0 {
+        return Image::new_owned(img.rgba().to_vec(), sw, sh);
+    }
+    let src = img.rgba();
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        let y0 = y * sh / h;
+        let y1 = ((y + 1) * sh / h).max(y0 + 1);
+        for x in 0..w {
+            let x0 = x * sw / w;
+            let x1 = ((x + 1) * sw / w).max(x0 + 1);
+            // Colour is weighted by alpha, so the transparent pixels around a glyph cannot drag
+            // its edge towards whatever colour they happen to carry.
+            let (mut rgb, mut alpha) = ([0u32; 3], 0u32);
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let p = ((sy * sw + sx) * 4) as usize;
+                    let a = src[p + 3] as u32;
+                    for (acc, c) in rgb.iter_mut().zip(&src[p..p + 3]) {
+                        *acc += *c as u32 * a;
+                    }
+                    alpha += a;
+                }
+            }
+            let n = (y1 - y0) * (x1 - x0);
+            out.extend(rgb.map(|c| if alpha == 0 { 0 } else { (c / alpha) as u8 }));
+            out.push((alpha / n) as u8);
+        }
+    }
+    Image::new_owned(out, w, h)
 }
 
 /// Repaint every runtime surface. Called at startup and whenever the icon changes.
@@ -43,11 +104,16 @@ pub fn apply(app: &AppHandle) {
     let Some(icon) = current(app) else { return };
     if let Some(w) = app.get_webview_window("main") {
         // Alt-Tab and the small titlebar icon. Tauri routes this to tao's `set_window_icon`,
-        // which sends WM_SETICON with ICON_SMALL and nothing else. The taskbar button reads
-        // ICON_BIG, so on Windows this call alone changes nothing the user is looking at.
+        // which sends WM_SETICON with ICON_SMALL and nothing else, at the source's own size.
+        //
+        // Windows takes the other path instead of both. `apply` runs off the main thread, so this
+        // call is a *queued* window message while `set_icons` is a synchronous `SendMessageW`:
+        // whichever lands last wins, and leaving both in would put the unscaled icon back at
+        // random. `set_icons` covers ICON_SMALL as well, at the size the shell draws.
+        #[cfg(not(target_os = "windows"))]
         let _ = w.set_icon(icon.clone());
         #[cfg(target_os = "windows")]
-        crate::taskbar::set_big_icon(&w, &icon);
+        crate::taskbar::set_icons(&w, &icon);
     }
     // The mini player is `skip_taskbar(true)` and undecorated, so its icon is never drawn.
     crate::tray::set_icon(app, &icon);
@@ -71,6 +137,36 @@ pub fn premultiplied_bgra(rgba: &[u8]) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
+    use tauri::image::Image;
+
+    /// The tray and taskbar hand the result straight to `CreateIconIndirect`, which takes the
+    /// buffer's length on trust, so a short one is a crash on Windows and nowhere else.
+    #[test]
+    fn scaled_halves_a_solid_square() {
+        let red = Image::new_owned([255u8, 0, 0, 255].repeat(16), 4, 4);
+        let out = super::scaled(&red, 2, 2);
+        assert_eq!((out.width(), out.height()), (2, 2));
+        assert_eq!(out.rgba(), [255u8, 0, 0, 255].repeat(4));
+    }
+
+    /// Averaging straight RGBA would pull the opaque pixel towards the transparent one's colour.
+    #[test]
+    fn scaled_ignores_the_colour_of_transparent_pixels() {
+        // One opaque red pixel, three fully transparent green ones.
+        let mut rgba = vec![255u8, 0, 0, 255];
+        rgba.extend([0u8, 255, 0, 0].repeat(3));
+        let out = super::scaled(&Image::new_owned(rgba, 2, 2), 1, 1);
+        assert_eq!(out.rgba(), &[255, 0, 0, 63]);
+    }
+
+    /// A source smaller than the target still has to produce exactly w*h*4 bytes.
+    #[test]
+    fn scaled_upwards_is_still_the_right_length() {
+        let out = super::scaled(&Image::new_owned(vec![1, 2, 3, 4], 1, 1), 5, 3);
+        assert_eq!(out.rgba().len(), 5 * 3 * 4);
+        assert_eq!(out.rgba()[..4], [1, 2, 3, 4]);
+    }
+
     #[test]
     fn rgba_to_premultiplied_bgra() {
         // Opaque pure red stays red in the R byte, not the B byte.

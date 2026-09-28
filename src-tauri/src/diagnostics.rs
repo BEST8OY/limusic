@@ -43,7 +43,14 @@ const ENV_KEYS: &[&str] = &[
 ];
 
 /// Env vars printed as `set`, never by value.
-const SECRET_ENV_KEYS: &[&str] = &["LIMUSIC_PROXY", "LIMUSIC_COOKIE", "LIMUSIC_VISITOR_DATA"];
+///
+/// APPIMAGE is here for privacy rather than secrecy: its value is the full path to the bundle,
+/// which on most systems contains the user's account name, and this text is written to be pasted
+/// into a public issue. `redact` turns $HOME into ~, which covers the usual case, but not an
+/// AppImage run from /opt or a mounted volume. What the path is actually consulted for (is this an
+/// AppImage install) is already on the first line of the header via `install_kind`.
+const SECRET_ENV_KEYS: &[&str] =
+    &["LIMUSIC_PROXY", "LIMUSIC_COOKIE", "LIMUSIC_VISITOR_DATA", "APPIMAGE"];
 
 /// Environment header + redacted log tail, capped at [`MAX_CHARS`].
 pub fn report(app: &AppHandle, db: &Db) -> String {
@@ -52,7 +59,7 @@ pub fn report(app: &AppHandle, db: &Db) -> String {
         "# Limusic diagnostics. Paste this into your bug report.\n\
          # Cookies, tokens, signed URLs, file paths and IP addresses have been removed.\n\n",
     );
-    header(&mut out, app, db);
+    out.push_str(&redact(&header(app, db)));
 
     let dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
     let budget = MAX_CHARS.saturating_sub(out.chars().count() + 64);
@@ -67,12 +74,18 @@ pub fn report(app: &AppHandle, db: &Db) -> String {
 /// Just the environment block, for prefilling the `system` field of the GitHub bug form. Short
 /// enough to travel in a URL, unlike [`report`].
 pub fn summary(app: &AppHandle, db: &Db) -> String {
-    let mut out = String::new();
-    header(&mut out, app, db);
-    out
+    redact(&header(app, db))
 }
 
-fn header(out: &mut String, app: &AppHandle, db: &Db) {
+/// The environment block, unredacted. Both callers run it through [`redact`]; do not push this
+/// into an output buffer directly.
+///
+/// It returns a String rather than taking `&mut String` precisely so that is hard to get wrong:
+/// the header used to be written straight into `report`'s buffer before redaction ran, which meant
+/// the AppImage path (and with it the user's account name) went into every pasted report, under a
+/// banner promising that file paths had been removed.
+fn header(app: &AppHandle, db: &Db) -> String {
+    let mut out = String::new();
     let _ = writeln!(
         out,
         "Limusic {} ({} {}, {})",
@@ -118,13 +131,17 @@ fn header(out: &mut String, app: &AppHandle, db: &Db) {
         );
     }
 
-    let disabled = db.get_setting("disabled_clients").unwrap_or_default();
+    // The key the setting is stored under (`commands.rs` UI_SETTINGS, `AppState::disabled_clients`).
+    // This used to read `disabled_clients`, which nothing writes, so it said "none" on every
+    // machine: the field that matters most when a report says nothing plays.
+    let disabled = db.get_setting("disabled_stream_clients").unwrap_or_default();
     let _ = writeln!(
         out,
-        "Signed in: {} | Proxy: {} | Quality: {} | Music videos: {} | Disabled clients: {}",
+        "Signed in: {} | Proxy: {} | Quality: {} | Normalize: {} | Music videos: {} | Disabled clients: {}",
         yes_no(db.get_setting("session_cookie").is_some_and(|c| !c.is_empty())),
         yes_no(db.get_setting("proxy").is_some_and(|p| !p.is_empty())),
         db.get_setting("quality").unwrap_or_else(|| "HIGH".into()),
+        yes_no(db.get_setting("normalize_volume").as_deref() != Some("false")),
         yes_no(db.get_setting("music_videos").as_deref() == Some("true")),
         if disabled.is_empty() { "none".into() } else { disabled },
     );
@@ -143,6 +160,7 @@ fn header(out: &mut String, app: &AppHandle, db: &Db) {
     if !env.is_empty() {
         let _ = writeln!(out, "Env: {}", env.join(", "));
     }
+    out
 }
 
 fn yes_no(b: bool) -> &'static str {
@@ -292,6 +310,52 @@ mod tests {
         assert!(out.contains("googlevideo.com/videoplayback"), "{out}");
         // A tracing target that merely ends in a secret-ish word keeps its message.
         assert!(out.contains("app_lib::potoken: session token still valid"), "{out}");
+    }
+
+    // `header` needs an `AppHandle`, so it has no test of its own. The two tests below feed `redact`
+    // header-shaped strings instead, which is the part that decides what reaches a public issue.
+
+    #[test]
+    fn redaction_takes_the_username_out_of_an_appimage_path() {
+        // The only test that touches HOME. Tests share a process, so the value is distinctive
+        // enough not to appear in any other test's input, and the old one is put back.
+        let saved = std::env::var("HOME").ok();
+        std::env::set_var("HOME", "/home/diag-user-7q");
+        let out =
+            redact("Env: RUST_LOG=info, APPIMAGE=/home/diag-user-7q/Downloads/limusic.AppImage\n");
+        match saved {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        assert!(!out.contains("diag-user-7q"), "username survived redaction:\n{out}");
+        assert!(out.contains("Env: RUST_LOG=info, APPIMAGE=~/Downloads/limusic.AppImage"), "{out}");
+    }
+
+    #[test]
+    fn redaction_leaves_the_header_readable() {
+        let header = concat!(
+            "Limusic 0.7.3 (linux x86_64, AppImage)\n",
+            "System: Fedora Linux 44 (KDE Plasma), kernel 7.1.8-200.fc44.x86_64, wayland session on KDE\n",
+            "WebKitGTK: 2.50.6, NVIDIA: yes\n",
+            "Signed in: yes | Proxy: no | Quality: HIGH | Normalize: yes | Music videos: yes | Disabled clients: none\n",
+        );
+        let out = redact(header);
+        for kept in [
+            "Limusic 0.7.3",
+            "Fedora Linux 44",
+            "7.1.8-200.fc44.x86_64",
+            "WebKitGTK: 2.50.6",
+            "Quality: HIGH",
+            "Normalize: yes",
+            "Disabled clients: none",
+        ] {
+            assert!(out.contains(kept), "{kept} lost to redaction:\n{out}");
+        }
+    }
+
+    #[test]
+    fn appimage_is_never_printed_by_value() {
+        assert!(SECRET_ENV_KEYS.contains(&"APPIMAGE"));
     }
 
     #[test]

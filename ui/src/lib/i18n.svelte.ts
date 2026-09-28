@@ -1,7 +1,11 @@
-// UI language. localStorage rather than SQLite, for the same reason the theme lives there: nothing
-// outside the webview reads it. YouTube is deliberately not part of this — see `getInitialLocale`.
+// UI language. localStorage is the source of truth, for the same reason the theme lives there: the
+// first paint has to be in the right language, and an async read paints English and flips a frame
+// later. Rust gets a copy too, because YouTube's own text is part of the language: see
+// `pushLocaleToRust`.
 import { browser } from '$app/environment';
+import { invoke } from '@tauri-apps/api/core';
 import { translations, LOCALES, type LocaleId, type Translations } from './locales';
+import { coverage } from './langlist';
 
 export type { LocaleId };
 
@@ -42,10 +46,23 @@ function getInitialLocale(): LocaleId {
 
 let activeLocale = $state<LocaleId>(getInitialLocale());
 
-export function setLocale(locale: LocaleId): void {
-	if (!Object.hasOwn(translations, locale)) return;
+/**
+ * Tell Rust which language to ask YouTube for (`hl`). Home shelf titles, the mood chips, playlist
+ * subtitles and auto-playlist names are YouTube's strings, not ours, so a Korean UI on `hl=en` reads
+ * half English (#274). Stored in SQLite there: the first home fetch of the next launch happens before
+ * this module could push anything, so Rust has to already know.
+ *
+ * `initApp` reconciles the two at startup, for the launches where nobody touched this picker.
+ */
+export function pushLocaleToRust(locale: LocaleId): Promise<void> {
+	return invoke<void>('set_setting', { key: 'locale', value: locale }).catch(() => {});
+}
+
+export function setLocale(locale: LocaleId): Promise<void> {
+	if (!Object.hasOwn(translations, locale)) return Promise.resolve();
 	activeLocale = locale;
 	localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+	return pushLocaleToRust(locale);
 }
 
 /** Reactive: every `t()` in the markup re-runs when this changes. */
@@ -77,5 +94,18 @@ export function t(key: TranslationKey, params?: Record<string, string | number>)
 	if (!params) return str;
 	return str.replace(/\{(\w+)\}/g, (_, k) => (params[k] !== undefined ? String(params[k]) : `{${k}}`));
 }
+
+/**
+ * How much of each catalog Weblate has actually landed, 0..1, so the picker can say a language is
+ * half English before someone picks it and finds out the hard way.
+ *
+ * Counted once at module load: the catalogs are bundled and nothing here changes at runtime.
+ */
+export const COVERAGE: Record<LocaleId, number> = (() => {
+	const ids = Object.keys(translations) as LocaleId[];
+	return Object.fromEntries(
+		ids.map((id) => [id, coverage(translations[id], translations.en)])
+	) as Record<LocaleId, number>;
+})();
 
 export { LOCALES };

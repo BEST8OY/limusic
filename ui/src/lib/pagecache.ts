@@ -33,6 +33,15 @@ export function invalidateCached(key: string): void {
 	store.delete(key);
 }
 
+/** Every entry under a key, whatever was appended to it. A playlist is cached once per sort order
+ *  (`playlist:<id>`, `playlist:<id>:title:desc`, ...), so dropping the one on screen leaves the
+ *  other orders holding rows the user has just removed, and changing the sort brings them back. */
+export function invalidateCachedPrefix(prefix: string): void {
+	for (const key of [...store.keys()]) {
+		if (key === prefix || key.startsWith(`${prefix}:`)) store.delete(key);
+	}
+}
+
 /** Drop everything — browse data is per-account, so sign-in/out makes all of it stale. */
 export function clearCached(): void {
 	store.clear();

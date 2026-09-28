@@ -6,23 +6,54 @@
 		ArrowUpNarrowWideIcon,
 		ArrowDownWideNarrowIcon,
 		PlayListAddIcon,
+		PlayListRemoveIcon,
 		Cancel01Icon
 	} from '@hugeicons/core-free-icons';
 	import { Button } from './ui/button';
 	import { enqueue, openAddManyToPlaylist, ui } from '$lib/player.svelte';
-	import { isLocalId } from '$lib/api';
+	import type { SongItem } from '$lib/api';
 	import { t } from '$lib/i18n.svelte';
 	import type { TrackSelection } from '$lib/selection.svelte';
 
-	let { selection, from }: { selection: TrackSelection; from?: string } = $props();
+	// `onRemove` is only given where the list is one the user can edit (a playlist page they own);
+	// everywhere else there is nothing to remove from and the button is absent.
+	let {
+		selection,
+		from,
+		onRemove
+	}: {
+		selection: TrackSelection;
+		from?: string;
+		onRemove?: (songs: SongItem[]) => Promise<void>;
+	} = $props();
 	let busy = $state(false);
-	const canAdd = $derived(selection.count > 0 && selection.songs.every((s) => !isLocalId(s.video_id)));
+	// Second click confirms: a bulk removal is not undoable, and the button sits next to Clear.
+	let confirmRemove = $state(false);
+	// Any change to what is selected drops a half-made confirmation, so the destructive button
+	// never carries over onto a different set of rows.
+	$effect(() => {
+		selection.count;
+		confirmRemove = false;
+	});
+	// Local files included: the picker narrows itself to the playlists on this machine for them.
+	const canAdd = $derived(selection.count > 0);
 	const blocked = $derived(busy || selection.selectingAll || selection.pending > 0);
 
 	function onKey(e: KeyboardEvent) {
 		// Space activates these buttons, never the app-wide transport shortcut.
 		if (e.key === ' ') e.stopPropagation();
 		if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); selection.exit(); }
+	}
+
+	async function remove() {
+		if (blocked || !selection.count || !onRemove) return;
+		confirmRemove = false;
+		busy = true;
+		try {
+			await onRemove([...selection.songs]);
+		} finally {
+			busy = false;
+		}
 	}
 
 	async function queue(next: boolean) {
@@ -77,6 +108,20 @@
 						onclick={() => openAddManyToPlaylist([...selection.songs])}>
 						<HugeiconsIcon icon={PlayListAddIcon} class="h-4 w-4" />
 					</Button>
+				{/if}
+				{#if onRemove}
+					{#if confirmRemove}
+						<Button variant="destructive" size="sm" disabled={blocked} onkeydown={onKey}
+							onclick={remove}>
+							{t('selection.remove_confirm', { count: selection.count })}
+						</Button>
+					{:else}
+						<Button variant="ghost" size="icon" disabled={blocked} onkeydown={onKey}
+							title={t('selection.remove')} aria-label={t('selection.remove')}
+							onclick={() => (confirmRemove = true)}>
+							<HugeiconsIcon icon={PlayListRemoveIcon} class="h-4 w-4" />
+						</Button>
+					{/if}
 				{/if}
 			{/if}
 

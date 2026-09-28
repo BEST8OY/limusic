@@ -1,14 +1,12 @@
 <script lang="ts">
 	// The artists you actually play, ranked by the play counts this machine has been keeping.
 	//
-	// It used to be a text list beside a "flower" of avatars floating in space, and the flower was
-	// decoration that carried no information: the same five faces again, arranged by trigonometry.
 	// What makes this section worth a slot is the one number no YouTube shelf has, your own play
-	// count, and the old layout spent both columns hiding it behind subscriber counts that are
-	// identical for every user on earth.
-	//
-	// So: a leaderboard. #1 gets a poster, the rest are rows whose background is filled in
-	// proportion to their plays, which turns the list into a bar chart you read without noticing.
+	// count, so every artist carries it. It has been a flower of floating avatars, then a poster for
+	// #1 beside rows whose backgrounds filled in proportion to their plays; those fills read as five
+	// boxes of different widths (#319). Now it is six posters in rank order, the same frame the feed
+	// uses for an artist (PortraitCard), with the rank and the count set on the photograph: the order
+	// carries the ranking, the count carries the "yours".
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { HugeiconsIcon } from '@hugeicons/svelte';
@@ -27,7 +25,7 @@
 	// ponytail: one browse call per artist, because the subscriber count and the subscribe state
 	// only exist on the artist page. Six of them, shared with the artist route's cache (same key),
 	// fired once per mount. Cut the count before reaching for a batch endpoint that doesn't exist.
-	const COUNT = 6; // one poster + five rows
+	const COUNT = 6; // one row of posters at full width, whole rows of two or three narrower
 	const MIN = 3; // fewer familiar artists than this and the section isn't worth a slot
 	const SLACK = 2; // extra ids fetched, to backfill the ones whose page comes back unparseable
 
@@ -53,13 +51,6 @@
 	let attempt = $state<Record<string, number>>({});
 
 	const ids = topArtistIds(personal, COUNT + SLACK);
-
-	const top = $derived(artists[0]);
-	const rest = $derived(artists.slice(1));
-	// The bars are relative to #1. A floor, because a heavy favourite makes everything below it a
-	// sliver: the ranking is the information, the width is only the feel of it.
-	const busiest = $derived(Math.max(1, top?.plays ?? 1));
-	const share = (a: Familiar) => Math.max(14, Math.round((a.plays / busiest) * 100));
 
 	const src = (a: ArtistPage) => ((attempt[a.channelId] ?? 0) === 0 ? thumb(a.thumbnail, 400) : a.thumbnail);
 	const hasArt = (a: ArtistPage) => !!a.thumbnail && (attempt[a.channelId] ?? 0) < 2;
@@ -137,15 +128,13 @@
 	}
 </script>
 
-{#snippet subButton(a: Familiar, onDark: boolean)}
+{#snippet subButton(a: Familiar)}
 	<button
-		class="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors {onDark
-			? 'bg-black/40 backdrop-blur-sm hover:bg-black/60'
-			: 'hover:bg-accent/10'} {subs[a.channelId]
+		class="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full bg-black/40 backdrop-blur-sm transition-colors hover:bg-black/60 {subs[
+			a.channelId
+		]
 			? 'text-primary'
-			: onDark
-				? 'text-white/70 hover:text-white'
-				: 'text-muted-foreground hover:text-foreground'}"
+			: 'text-white/70 hover:text-white'}"
 		class:animate-pulse={subBusy === a.channelId}
 		aria-label={subs[a.channelId]
 			? t('artist.unsubscribe_from', { name: a.name ?? '' })
@@ -179,81 +168,18 @@
 {#if loading ? ids.length >= MIN : artists.length >= MIN}
 	<section>
 		<SectionHeading title={t('home.familiar_artists')} icon={UserStar01Icon} />
-		<div class="grid gap-5 md:grid-cols-[15rem_1fr] lg:grid-cols-[18rem_1fr] md:gap-7">
-			<!-- The poster. Tall on desktop where it sits beside the rows; letterboxed on a narrow
-			     window, where a 3:4 frame at full width would be a full screen of one face. -->
-			{#if loading || !top}
-				<Skeleton class="aspect-[16/9] w-full rounded-2xl md:aspect-[4/5]" />
+		<div class="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+			{#if loading}
+				{#each Array(Math.min(ids.length, COUNT)) as _, i (i)}
+					<Skeleton class="aspect-[4/5] w-full rounded-2xl" />
+				{/each}
 			{:else}
-				<div class="group relative aspect-[16/9] w-full md:aspect-[4/5]" data-ctx>
-					<div
-						class="relative h-full w-full cursor-pointer overflow-hidden rounded-2xl bg-muted"
-						role="button"
-						tabindex="0"
-						onclick={() => open(top)}
-						onkeydown={(e) => {
-							if (e.target !== e.currentTarget) return;
-							if (e.key === 'Enter' || e.key === ' ') {
-								e.preventDefault();
-								open(top);
-							}
-						}}
-						title={top.name ?? t('common.artist_singular')}
-					>
-						<div class="h-full w-full transition-transform duration-500 ease-out group-hover:scale-[1.05]">
-							{@render avatar(top, 'h-10 w-10')}
-						</div>
+				{#each artists as a, i (a.channelId)}
+					<div class="group relative aspect-[4/5] w-full" data-ctx>
 						<div
-							class="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/90 via-black/25 to-transparent"
-						></div>
-						<div class="pointer-events-none absolute inset-x-0 bottom-0 p-4">
-							<div class="font-heading text-xs font-semibold tracking-widest text-primary">
-								{rank(0)}
-							</div>
-							<div class="mt-1 line-clamp-2 font-heading text-xl font-bold leading-tight text-white">
-								{top.name ?? t('common.unknown_artist')}
-							</div>
-							<div class="mt-1 truncate text-xs text-white/60">
-								{t('library.play_count', { count: top.plays })}{top.subscribers
-									? ` · ${top.subscribers}`
-									: ''}
-							</div>
-						</div>
-					</div>
-					<div class="absolute right-2 top-2 flex items-center gap-1">
-						{@render subButton(top, true)}
-						<PlaylistMenu
-							item={asItem(top)}
-							showPin={false}
-							vertical
-							iconClass="h-5 w-5"
-							triggerClass="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full bg-black/40 text-white/70 backdrop-blur-sm transition hover:bg-black/60 hover:text-white"
-						/>
-					</div>
-				</div>
-			{/if}
-
-			<!-- Ranks two and down. Each row's fill is its share of the leader's plays, so the shape of
-			     what you listen to is in the background of the list rather than in a second widget. -->
-			<div class="flex flex-col justify-between gap-1">
-				{#if loading || !top}
-					{#each Array(Math.min(ids.length, COUNT) - 1) as _, i (i)}
-						<div class="flex items-center gap-3 p-2" aria-hidden="true">
-							<Skeleton class="h-3 w-5 rounded" />
-							<Skeleton class="h-11 w-11 shrink-0 rounded-full" />
-							<div class="flex min-w-0 flex-1 flex-col gap-1.5">
-								<Skeleton class="h-3.5 w-32 rounded" />
-								<Skeleton class="h-3 w-20 rounded" />
-							</div>
-						</div>
-					{/each}
-				{:else}
-					{#each rest as a, i (a.channelId)}
-						<div
-							class="group/row relative flex cursor-pointer items-center gap-3 overflow-hidden rounded-xl p-2 text-left"
+							class="relative h-full w-full cursor-pointer overflow-hidden rounded-2xl bg-muted"
 							role="button"
 							tabindex="0"
-							data-ctx
 							onclick={() => open(a)}
 							onkeydown={(e) => {
 								if (e.target !== e.currentTarget) return;
@@ -262,39 +188,47 @@
 									open(a);
 								}
 							}}
+							title={a.name ?? t('common.artist_singular')}
 						>
 							<div
-								class="pointer-events-none absolute inset-y-0 left-0 rounded-xl bg-gradient-to-r from-primary/[0.14] to-primary/[0.03] transition-[width,opacity] duration-300 ease-out group-hover/row:from-primary/25 group-hover/row:to-primary/[0.06]"
-								style="width:{share(a)}%"
-							></div>
-							<div
-								class="relative w-5 shrink-0 text-center font-heading text-xs font-semibold text-muted-foreground/60 transition-colors group-hover/row:text-primary"
+								class="h-full w-full"
 							>
-								{rank(i + 1)}
+								{@render avatar(a, 'h-10 w-10')}
 							</div>
-							<div class="relative h-11 w-11 shrink-0 overflow-hidden rounded-full bg-muted">
-								{@render avatar(a, 'h-5 w-5')}
-							</div>
-							<div class="relative min-w-0 flex-1">
-								<div class="truncate text-sm font-medium">{a.name ?? t('common.unknown_artist')}</div>
-								<div class="truncate text-xs text-muted-foreground">
+							<div
+								class="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/85 via-black/20 to-transparent"
+							></div>
+							<div class="pointer-events-none absolute inset-x-0 bottom-0 p-3.5">
+								<div class="font-heading text-xs font-semibold tracking-widest text-primary">
+									{rank(i)}
+								</div>
+								<div
+									class="mt-0.5 line-clamp-2 font-heading text-base font-bold leading-tight text-white"
+								>
+									{a.name ?? t('common.unknown_artist')}
+								</div>
+								<div class="mt-0.5 truncate text-xs text-white/65">
 									{t('library.play_count', { count: a.plays })}
 								</div>
 							</div>
-							<div class="relative flex shrink-0 items-center gap-0.5">
-								{@render subButton(a, false)}
-								<PlaylistMenu
-									item={asItem(a)}
-									showPin={false}
-									vertical
-									iconClass="h-5 w-5"
-									triggerClass="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition hover:bg-accent/10 hover:text-foreground"
-								/>
-							</div>
 						</div>
-					{/each}
-				{/if}
-			</div>
+						<!-- On hover or focus only: six posters each carrying two buttons at rest is a
+						     dozen dark discs over the faces. -->
+						<div
+							class="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
+						>
+							{@render subButton(a)}
+							<PlaylistMenu
+								item={asItem(a)}
+								showPin={false}
+								vertical
+								iconClass="h-5 w-5"
+								triggerClass="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full bg-black/40 text-white/70 backdrop-blur-sm transition hover:bg-black/60 hover:text-white"
+							/>
+						</div>
+					</div>
+				{/each}
+			{/if}
 		</div>
 	</section>
 {/if}

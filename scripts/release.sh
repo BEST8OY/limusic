@@ -33,10 +33,28 @@ NOTES="${1:-See the commit history for changes.}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# semver_gt A B: A ranks above B. x.y.z numerically, then a release above its own prereleases, then
+# prerelease suffixes by version sort. `sort -V` alone gets the middle rule backwards: it puts
+# 1.1.0-rc.1 after 1.1.0. Same function as the release workflows' promotion step.
+semver_gt() {
+  [ "$1" != "$2" ] || return 1
+  local a="${1%%-*}" b="${2%%-*}"
+  if [ "$a" != "$b" ]; then
+    [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)" = "$a" ]
+    return
+  fi
+  [ "$1" != "$a" ] || return 0
+  [ "$2" != "$b" ] || return 1
+  [ "$(printf '%s\n%s\n' "${1#*-}" "${2#*-}" | sort -V | tail -1)" = "${1#*-}" ]
+}
+
 VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
 [ "$VERSION" != "null" ] && [ -n "$VERSION" ] || die "no version in tauri.conf.json"
 TAG="v$VERSION"
-echo "==> Releasing $TAG"
+# A version with a `-` (1.1.0-rc.1) is a release candidate: published as a prerelease, never
+# Latest, no rpm, and reaching only installs on the beta channel (RELEASING.md §8).
+RC=0; [[ "$VERSION" != *-* ]] || RC=1
+echo "==> Releasing $TAG$([ "$RC" = 0 ] || echo " (release candidate, beta channel only)")"
 
 # ---------------------------------------------------------------------------
 # Preflight. Every check here is a mistake that has already cost a release
@@ -73,10 +91,23 @@ git fetch --quiet origin master
 # tag on the remote, so a tag can be live without ever being fetched here: before v0.3.14
 # `git describe` said v0.3.12 while v0.3.13 was published and marked Latest. Releasing a version
 # that is not higher than the published one means no installed user is ever prompted.
-HIGHEST="$(gh release list --repo "$REPO" --limit 50 --json tagName --jq '.[].tagName' \
-  | sed 's/^v//' | sort -V | tail -1)"
-[ "$(printf '%s\n%s\n' "$VERSION" "$HIGHEST" | sort -V | head -1)" != "$VERSION" ] \
+#
+# A release is compared with releases only, so a 1.0.3 fix can ship while 1.1.0-rc.1 is out. A
+# rolled-back release counts although it was demoted to a prerelease: it is its tag that decides,
+# not the flag. An RC is compared with everything, so it lands above whatever the beta channel
+# already holds. The `beta` pointer's own tag is not a version and is skipped.
+HIGHEST=""
+while read -r v; do
+  [ "$RC" = 1 ] || [[ "$v" != *-* ]] || continue
+  if [ -z "$HIGHEST" ] || semver_gt "$v" "$HIGHEST"; then HIGHEST="$v"; fi
+done < <(gh release list --repo "$REPO" --limit 50 --json tagName --jq '.[].tagName' \
+  | sed -n 's/^v\([0-9]\)/\1/p')
+[ -z "$HIGHEST" ] || semver_gt "$VERSION" "$HIGHEST" \
   || die "$VERSION is not above the newest published release (${HIGHEST:-none}). Installed users would never be prompted"
+
+# The beta channel's manifest lives on this release, and the workflows fail an RC without it.
+gh release view beta --repo "$REPO" >/dev/null 2>&1 \
+  || die "no \`beta\` release to hold the beta channel's manifest. Create it once, see RELEASING.md §8"
 
 echo "    clean tree, pushed, $VERSION > ${HIGHEST:-none}"
 
@@ -126,11 +157,13 @@ EOF
 
 echo "==> Publishing GitHub release $TAG…"
 # --latest=false: the Linux workflow flips it once the AppImage is on the release. See the header.
+PRE=(); [ "$RC" = 0 ] || PRE=(--prerelease)
 gh release create "$TAG" \
   --repo "$REPO" \
   --title "$TAG" \
   --notes "$NOTES" \
   --latest=false \
+  "${PRE[@]}" \
   target/release/bundle/latest.json
 
 # Newest run id for a workflow, or 0 if it has never run. Used to tell the run we are about to
@@ -167,22 +200,28 @@ RUN_WIN="$(wait_for_run "Windows release binaries" "$BEFORE_WIN" || true)"
 RUN_MAC="$(wait_for_run "macOS release binaries" "$BEFORE_MAC" || true)"
 echo "    linux run ${RUN_LINUX:-?}, windows run ${RUN_WIN:-?}, macos run ${RUN_MAC:-?}"
 
-echo "==> Building the rpm locally while CI runs…"
-if ! cargo tauri build --bundles rpm; then
-  echo >&2
-  echo "ERROR: the rpm build failed, but $TAG is already published and CI is building the rest." >&2
-  echo "       Fix it, then attach the rpm by hand:" >&2
-  echo "         cargo tauri build --bundles rpm" >&2
-  echo "         gh release upload $TAG target/release/bundle/rpm/limusic-$VERSION-*.rpm --clobber --repo $REPO" >&2
-  exit 1
-fi
+# No rpm for a release candidate: an rpm install can't take an update, so it can't be on the beta
+# channel, and the RC's only audience is the beta channel.
+if [ "$RC" = 1 ]; then
+  echo "==> Release candidate: no rpm"
+else
+  echo "==> Building the rpm locally while CI runs…"
+  if ! cargo tauri build --bundles rpm; then
+    echo >&2
+    echo "ERROR: the rpm build failed, but $TAG is already published and CI is building the rest." >&2
+    echo "       Fix it, then attach the rpm by hand:" >&2
+    echo "         cargo tauri build --bundles rpm" >&2
+    echo "         gh release upload $TAG target/release/bundle/rpm/limusic-$VERSION-*.rpm --clobber --repo $REPO" >&2
+    exit 1
+  fi
 
-# Pin to $VERSION — a stale bundle from a previous build otherwise sorts first and gets shipped
-# (e.g. an old 0.1.1 rpm uploaded to the 0.1.2 release).
-RPM="$(ls target/release/bundle/rpm/limusic-${VERSION}-*.rpm 2>/dev/null | head -1)"
-[ -n "$RPM" ] || die "no rpm for $VERSION in target/release/bundle/rpm"
-gh release upload "$TAG" "$RPM" --clobber --repo "$REPO"
-echo "    attached $(basename "$RPM")"
+  # Pin to $VERSION — a stale bundle from a previous build otherwise sorts first and gets shipped
+  # (e.g. an old 0.1.1 rpm uploaded to the 0.1.2 release).
+  RPM="$(ls target/release/bundle/rpm/limusic-${VERSION}-*.rpm 2>/dev/null | head -1)"
+  [ -n "$RPM" ] || die "no rpm for $VERSION in target/release/bundle/rpm"
+  gh release upload "$TAG" "$RPM" --clobber --repo "$REPO"
+  echo "    attached $(basename "$RPM")"
+fi
 
 # ---------------------------------------------------------------------------
 # Wait for CI and check the release is actually complete. Without this the
@@ -201,19 +240,29 @@ for run in "$RUN_LINUX" "$RUN_WIN" "$RUN_MAC"; do
 done
 
 echo "==> Verifying the published release…"
-MANIFEST="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" || true)"
+# An RC is checked where the beta channel reads it, a release where everyone does.
+if [ "$RC" = 1 ]; then
+  MANIFEST="$(curl -sL "https://github.com/$REPO/releases/download/beta/latest.json" || true)"
+else
+  MANIFEST="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" || true)"
+fi
 LATEST_TAG="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || true)"
 has_platform() { printf '%s' "$MANIFEST" | jq -e --arg k "$1" '.platforms[$k].url // empty' >/dev/null 2>&1; }
 
 OK=1
-[ "$LATEST_TAG" = "$TAG" ] || { echo "    NOT LATEST: /releases/latest still resolves to ${LATEST_TAG:-nothing}"; OK=0; }
+if [ "$RC" = 0 ]; then
+  [ "$LATEST_TAG" = "$TAG" ] || { echo "    NOT LATEST: /releases/latest still resolves to ${LATEST_TAG:-nothing}"; OK=0; }
+fi
 [ "$(printf '%s' "$MANIFEST" | jq -r .version 2>/dev/null)" = "$VERSION" ] \
   || { echo "    WRONG MANIFEST: the live latest.json is not for $VERSION"; OK=0; }
 has_platform linux-x86_64   || { echo "    MISSING: latest.json has no linux-x86_64 entry (AppImage users get no update)"; OK=0; }
 has_platform windows-x86_64 || { echo "    MISSING: latest.json has no windows-x86_64 entry (Windows users get no update)"; OK=0; }
 has_platform darwin-aarch64 || { echo "    MISSING: latest.json has no darwin-aarch64 entry (Mac users get no update)"; OK=0; }
 
-if [ "$OK" = 1 ] && [ "$CI_OK" = 1 ]; then
+if [ "$OK" = 1 ] && [ "$CI_OK" = 1 ] && [ "$RC" = 1 ]; then
+  echo "==> $TAG is live on the beta channel: AppImage + Windows installer + macOS app, all three"
+  echo "    platforms in the beta manifest. Stable installs are not offered it."
+elif [ "$OK" = 1 ] && [ "$CI_OK" = 1 ]; then
   echo "==> $TAG is live and complete: rpm + deb + AppImage + Windows installers + macOS dmg, all"
   echo "    three platforms in latest.json, marked Latest. Installed users will be prompted."
 else

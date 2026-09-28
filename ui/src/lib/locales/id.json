@@ -60,7 +60,9 @@
 		"filter_library": "Filter perpustakaan Anda…",
 		"command_description": "Cari lagu, album, artis, dan daftar putar",
 		"shuffle_all": "Acak semua",
-		"play_all": "Putar semua"
+		"play_all": "Putar semua",
+		"top_result": "Hasil teratas",
+		"all_results_for": "Semua hasil untuk “{query}”"
 	},
 	"nav": {
 		"home": "Beranda",
@@ -82,7 +84,8 @@
 		"remove_account": "Hapus akun",
 		"remove_account_title": "Hapus dari Limusic?",
 		"remove_account_desc": "{name} hanya dihapus dari list ini. Akun Google-nya sendiri tidak terpengaruhi, dan kamu bisa masuk dengan itu kapanpun kamu mau.",
-		"saved_accounts_hint": "Pilih Akun tersimpan untuk pindah ke akun tersebut."
+		"saved_accounts_hint": "Pilih Akun tersimpan untuk pindah ke akun tersebut.",
+		"no_channels": "YouTube tidak mengembalikan saluran yang dapat dipilih."
 	},
 	"player": {
 		"play": "Putar",
@@ -154,7 +157,8 @@
 		"show_section": "Tampilkan {title} di beranda",
 		"hide_section": "Sembunyikan {title} dari beranda",
 		"feed_empty": "Umpan beranda Anda kosong kali ini.",
-		"signed_out_hint": "Masuk dan beranda Anda akan terisi dengan campuran lagu dan daftar putar berdasarkan apa yang Anda dengarkan."
+		"signed_out_hint": "Masuk dan beranda Anda akan terisi dengan campuran lagu dan daftar putar berdasarkan apa yang Anda dengarkan.",
+		"add_to_end": "Tambahkan ke akhir"
 	},
 	"artist": {
 		"subscribe": "Berlangganan",
@@ -196,7 +200,18 @@
 		"every_upload": "Setiap trek yang Anda unggah ke YouTube Music",
 		"no_uploads": "Belum ada yang diunggah. Lagu yang Anda unggah di music.youtube.com akan muncul di sini.",
 		"uploads_signed_out": "Masuk untuk melihat musik yang telah Anda unggah ke YouTube Music.",
-		"no_upload_albums": "Belum ada album yang diunggah. Album yang kamu unggah di music.youtube.com akan muncul di sini."
+		"no_upload_albums": "Belum ada album yang diunggah. Album yang kamu unggah di music.youtube.com akan muncul di sini.",
+		"songs_signed_out": "Masuk untuk melihat lagu yang tersimpan di perpustakaan Youtube Music kamu. Music yang ada di mesin ini derdapat pada tab lokal.",
+		"no_library_songs": "Belum ada lagu di perpustakaan Anda. Ketuk ⋯ pada lagu lalu simpan, atau sukai lagu tersebut, dan lagu akan muncul di sini.",
+		"empty_signed_out": "Belum ada yang tersimpan. Buka playlist atau album dan tekan Simpan ke Perpustakaan, atau masuk untuk yang ada di akun kamu.",
+		"empty": "Perpustakaan kamu kosong.",
+		"no_saved_playlists": "Belum ada daftar putar. Buka salah satu dan ketuk Simpan ke perpustakaan agar tersimpan di sini.",
+		"no_saved_albums": "Belum ada album. Buka sebuah album dan tekan Simpan ke Perpustakaan.",
+		"no_saved_artists": "Belum ada artis. Simpan dari halaman-nya untuk menyimpannya disini.",
+		"no_artists": "Belum ada artis. Mereka akan muncul ketika kamu menyimpan lagu atau album mereka.",
+		"on_repeat": "Dalam pengulangan",
+		"on_repeat_subtitle": "{count} lagu yang kamu putar paling banyak bulan ini",
+		"songs_count": "{count} lagu"
 	},
 	"local": {
 		"scanning": "Memindai folder...",
@@ -206,7 +221,11 @@
 		"artists_count": "Artis ({count})",
 		"songs_count": "Lagu ({count})",
 		"add_folder": "Tambah folder",
-		"pick_folder_dialog": "Tambah folder musik"
+		"pick_folder_dialog": "Tambah folder musik",
+		"folders": "Berkas",
+		"folders_hint": "Music dalam folder ini dapat diputar tanpa koneksi internet.",
+		"no_folders": "Belum ada folder. Tambahkan folder tempat Anda menyimpan musik dan folder akan muncul di sini.",
+		"nothing_playable": "Belum ada file yang dapat diputar di dalam folder tersebut. Mencari file mp3, flac, m4a, aac, ogg, opus, wav, wma, aiff, ape, wv, dan mka."
 	},
 	"settings": {
 		"title": "Pengaturan",
@@ -262,15 +281,12 @@
 			"system_titlebar_hint": "Biarkan desktop Anda menampilkan bingkai jendela beserta tombol-tombolnya. Limusic tetap menggunakan bilah alatnya sendiri di bawahnya."
 		},
 		"themes": {
-			"accent_themes": "Tema Aksen",
 			"interface_font": "Font antarmuka",
 			"load_font_file": "Muat font dari file",
 			"custom_colors": "Warna Kustom",
 			"primary_color": "Aksen Utama",
 			"background_color": "Latar Belakang",
 			"reset_theme": "Atur ulang ke tema bawaan",
-			"accent_colors": "Warna aksen",
-			"palettes": "Palet",
 			"your_fonts": "Font Anda",
 			"custom_font": "Kustom…",
 			"font_placeholder": "Font terinstal di komputer ini, mis. Inter",
@@ -585,7 +601,20 @@
 		"app_icon_set": "Ikon aplikasi terganti",
 		"blocked_copied": "{count} artis terblokir tersalin sebagai JSON",
 		"blocked_artist": "{name} terblokir",
-		"unblocked_artist": "Blokir {name} telah dibuka"
+		"unblocked_artist": "Blokir {name} telah dibuka",
+		"added_to_shortcuts": "Ditambahkan ke pintasan",
+		"already_in_shortcuts": "Sudah ada di pintasan",
+		"playing_next_one": "Memutar selanjutnya",
+		"playing_next": "{count} lagu diputar lagunya",
+		"added_to_queue_one": "Ditambahkan ke antrean",
+		"added_to_queue": "{count} lagu ditambahkan ke antrean",
+		"liked": "Ditambahkan ke lagu yang disukai",
+		"disliked": "Tidak suka",
+		"rating_removed": "Peringkat dihapus",
+		"subscribed": "Berlangganan ke {name}",
+		"unsubscribed": "Tidak berlangganan",
+		"signed_in_as": "Masuk sebagai {name}",
+		"switched_to": "Berpindah ke {name}"
 	},
 	"history": {
 		"title": "Riwayat",
@@ -595,5 +624,25 @@
 		"songs_count": "{count} lagu",
 		"empty": "Belum ada apa-apa di sini. Apa pun yang kamu putar saat masuk akan muncul di halaman ini.",
 		"signed_out": "Masuk untuk melihat riwayat mendengarkan YouTube Music kamu."
+	},
+	"selection": {
+		"actions": "Tindakan trek terpilih",
+		"count": "{count} terpilih",
+		"selected": "Terpilih",
+		"not_selected": "Tidak terpilih",
+		"hidden": "{count} tersembunyi",
+		"enter": "Pilih trek",
+		"exit": "Keluar dari mode pilih",
+		"hint": "Pilih trek untuk melakukan tindakan",
+		"select_all": "Pilih semua ({count})",
+		"clear": "Bersihkan",
+		"track": "{title}. Spasi untuk pilih, Enter untuk mulai.",
+		"track_guest": "{title}. Spasi untuk memilih, Enter untuk menambahkan ke antrean sesi.",
+		"select_track": "Pilih {title}",
+		"lost": "{count} Trek terpilih tidak ada lagi di daftar ini.",
+		"pending": "Mencari {count} trek terpilih pada halaman yang masih dimuat.",
+		"local_playlist": "File lokal tidak dapat ditambahkan ke playlist Youtube.",
+		"account_changed": "Berhenti menambahkan lagu karena akun telah berubah.",
+		"playlist_partial": "Menambahkan {added} ke {playlist}; {duplicates} sudah ada di sana; {remaining} belum dikonfirmasi. {error}"
 	}
 }
